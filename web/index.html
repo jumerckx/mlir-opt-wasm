@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mlir-opt (wasm) demo</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 80rem; }
+    h1 { margin: 0 0 0.25rem; font-size: 1.2rem; }
+    h2 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; }
+    .controls { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+    .controls input { flex: 1; font-family: ui-monospace, monospace; padding: 0.3rem; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    textarea { width: 100%; height: 20rem; font-family: ui-monospace, monospace; box-sizing: border-box; }
+    pre { background: rgba(127,127,127,0.1); padding: 0.5rem; height: 10rem; overflow: auto; margin: 0; font-family: ui-monospace, monospace; white-space: pre-wrap; }
+    #status { font-style: italic; opacity: 0.7; margin: 0.25rem 0; }
+    button { padding: 0.35rem 1rem; }
+  </style>
+</head>
+<body>
+  <h1>mlir-opt (wasm) demo</h1>
+  <p id="status">Loading mlir-opt.wasm…</p>
+  <div class="controls">
+    <label for="args">args:</label>
+    <input id="args" value="--canonicalize --cse">
+    <button id="run" disabled>Run</button>
+  </div>
+  <div class="row">
+    <div>
+      <h2>Input MLIR</h2>
+      <textarea id="input">func.func @demo(%a: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %0 = arith.addi %a, %c0 : i32
+  %1 = arith.addi %a, %c0 : i32
+  %2 = arith.addi %0, %1 : i32
+  return %2 : i32
+}
+</textarea>
+    </div>
+    <div>
+      <h2>Output</h2>
+      <textarea id="output" readonly></textarea>
+    </div>
+  </div>
+  <h2>Log</h2>
+  <pre id="log"></pre>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
