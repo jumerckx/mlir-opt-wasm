@@ -158,23 +158,62 @@
           '';
         };
 
+        # --- CodeMirror bundle ------------------------------------------------
+        # Pull the four @codemirror sub-packages we need via npm, then bundle
+        # them through esbuild into a single ESM file. Hosting the result next
+        # to the wasm gives the page zero runtime CDN dependencies and avoids
+        # the multi-instance-of-@codemirror/state Facet/instanceof pitfalls.
+        #
+        # The build inputs (./web/codemirror/) are just a package.json + a
+        # small re-export entry; no upstream CodeMirror source is checked in.
+        codemirror-bundle = pkgs.buildNpmPackage {
+          pname = "mlir-opt-codemirror-bundle";
+          version = "1.0.0";
+          src = ./web/codemirror;
+
+          npmDepsHash = "sha256-y0Ddhop9QxFN1TWdpl1d6R6CIIUylF3sZsFWnk9tYnM=";
+
+          dontNpmBuild = true;
+          nativeBuildInputs = [ pkgs.esbuild ];
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            esbuild entry.js \
+              --bundle \
+              --format=esm \
+              --target=es2020 \
+              --outfile=$out/codemirror.js
+            runHook postInstall
+          '';
+        };
+
         # --- Stage 4 ----------------------------------------------------------
         # Assemble the static site: HTML + JS from ./web/ plus the wasm
-        # artifacts, all at the root of $out. This is what gets uploaded to
-        # GitHub Pages, and what you serve locally via `python3 web/serve.py
-        # result/`.
+        # artifacts and the CodeMirror bundle, all at the root of $out. This is
+        # what gets uploaded to GitHub Pages, and what you serve locally via
+        # `python3 web/serve.py result/`.
         site = pkgs.runCommand "mlir-opt-wasm-site" { } ''
           mkdir -p $out
-          cp ${./web/index.html} $out/index.html
-          cp ${./web/app.js}     $out/app.js
-          cp ${mlir-opt-wasm}/mlir-opt.mjs  $out/mlir-opt.mjs
-          cp ${mlir-opt-wasm}/mlir-opt.wasm $out/mlir-opt.wasm
+          cp ${./web/index.html}              $out/index.html
+          cp ${./web/app.js}                  $out/app.js
+          cp ${codemirror-bundle}/codemirror.js $out/codemirror.js
+          cp ${mlir-opt-wasm}/mlir-opt.mjs    $out/mlir-opt.mjs
+          cp ${mlir-opt-wasm}/mlir-opt.wasm   $out/mlir-opt.wasm
           chmod -R u+w $out
         '';
+
+        devShell = pkgs.mkShell {
+          # `npm install` inside web/codemirror/ to regenerate
+          # package-lock.json whenever the dep versions in package.json change.
+          buildInputs = [ pkgs.nodejs pkgs.esbuild ];
+        };
       in {
         packages = {
           default = site;
-          inherit llvm-native-tblgens mlir-wasm-sysroot mlir-opt-wasm site;
+          inherit llvm-native-tblgens mlir-wasm-sysroot mlir-opt-wasm
+                  codemirror-bundle site;
         };
+        devShells.default = devShell;
       });
 }

@@ -1,0 +1,13 @@
+{
+  "name": "mlir-opt-cm-vendor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bundled CodeMirror 6 ESM build for the mlir-opt-wasm demo.",
+  "dependencies": {
+    "@codemirror/commands": "6.5.0",
+    "@codemirror/language": "6.10.1",
+    "@codemirror/state": "6.4.1",
+    "@codemirror/view": "6.26.3"
+  }
+}

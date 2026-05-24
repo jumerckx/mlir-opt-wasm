@@ -1,36 +1,64 @@
-import MlirOpt from "./mlir-opt.mjs";
+// MLIR demo editor. The text editors are CodeMirror 6 instances; we drive
+// styling from the wasm-side `mlir_highlight` parser via Decoration.mark.
+
+// All CodeMirror symbols come from the locally bundled ESM file produced by
+// the `codemirror-bundle` Nix derivation. Single module instance, no CDN.
+import {
+  EditorState,
+  StateField,
+  StateEffect,
+  RangeSetBuilder,
+  EditorView,
+  Decoration,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  highlightSpecialChars,
+  drawSelection,
+  dropCursor,
+  rectangularSelection,
+  crosshairCursor,
+  history,
+  defaultKeymap,
+  historyKeymap,
+  indentWithTab,
+  indentUnit,
+  bracketMatching,
+  foldGutter,
+  foldKeymap,
+} from "./codemirror.js";
+
+// A compact "basic setup" assembled from the four sub-packages we already
+// pull in. Avoids the `codemirror` umbrella, which would drag autocomplete /
+// search / lint in and make the dep graph harder to dedupe.
+const basicSetup = [
+  lineNumbers(),
+  highlightActiveLineGutter(),
+  highlightSpecialChars(),
+  history(),
+  foldGutter(),
+  drawSelection(),
+  dropCursor(),
+  EditorState.allowMultipleSelections.of(true),
+  bracketMatching(),
+  rectangularSelection(),
+  crosshairCursor(),
+  highlightActiveLine(),
+  keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
+];
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
 const statusEl = $("status");
 const runEl = $("run");
+const inputErr = $("input-err");
+const outputErr = $("output-err");
 
 const log = (s) => {
   logEl.textContent += s + "\n";
   logEl.scrollTop = logEl.scrollHeight;
 };
-
-// ---------------------------------------------------------------------------
-// DOM wiring -- do this *synchronously* before touching any wasm, so the
-// textarea text is always visible (its color is transparent; the overlay <pre>
-// is what the user sees). If wasm load fails for any reason, the editor still
-// works as a plain text box.
-
-const inputTa = $("input");
-const inputHl = $("input-hl");
-const inputErr = $("input-err");
-const outputHl = $("output-hl");
-const outputErr = $("output-err");
-
-const ESC_RE = /[&<>]/g;
-const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
-const escapeHtml = (s) => s.replace(ESC_RE, (c) => ESC_MAP[c]);
-
-// Render plain text into the overlay, preserving whitespace. Adds a trailing
-// space when the text ends with a newline so the <pre> doesn't collapse it.
-function renderPlain(targetEl, text) {
-  targetEl.textContent = text.endsWith("\n") ? text + " " : text;
-}
 
 function showError(errEl, message) {
   if (message) {
@@ -42,51 +70,12 @@ function showError(errEl, message) {
   }
 }
 
-function syncInputScroll() {
-  inputHl.scrollTop = inputTa.scrollTop;
-  inputHl.scrollLeft = inputTa.scrollLeft;
-}
-
-// Highlighter binding -- initially a no-op. Replaced once the wasm module is
-// instantiated. The signature is: (text) => parsed-json-or-null. A return of
-// null means "not available; fall back to plain text".
-let highlight = () => null;
-
-function updateInputHighlight() {
-  const text = inputTa.value;
-  const parsed = highlight(text);
-  if (!parsed) {
-    renderPlain(inputHl, text);
-    showError(inputErr, null);
-    return;
-  }
-  renderHighlighted(inputHl, text, parsed);
-  showError(inputErr, parsed.ok ? null : parsed.err);
-}
-
-let inputDebounce = null;
-inputTa.addEventListener("input", () => {
-  // Always update the overlay synchronously so the textarea text stays
-  // visible even while we wait to re-parse.
-  renderPlain(inputHl, inputTa.value);
-  clearTimeout(inputDebounce);
-  inputDebounce = setTimeout(updateInputHighlight, 250);
-  syncInputScroll();
-});
-inputTa.addEventListener("scroll", syncInputScroll);
-window.addEventListener("resize", syncInputScroll);
-
-// Initial paint -- happens immediately, before any wasm load.
-renderPlain(inputHl, inputTa.value);
-wireValueHover(inputHl);
-wireValueHover(outputHl);
-
 // ---------------------------------------------------------------------------
-// Highlight rendering.
+// Highlight pipeline.
 
 // SMLoc offsets from the parser are byte offsets into a UTF-8 encoding of the
-// text, but we render JS UTF-16 strings. Build a lookup from byte index to
-// char index. Most MLIR is pure ASCII, so this is usually 1:1.
+// text, but our editor talks UTF-16. Build a byte → char index map. Most MLIR
+// is ASCII so this is normally 1:1.
 function buildByteToChar(text) {
   const map = new Array(text.length + 1);
   let bi = 0;
@@ -106,75 +95,163 @@ function buildByteToChar(text) {
   return map;
 }
 
-function styleFor(kind, id) {
-  if ((kind === "val-def" || kind === "val-use") && id != null) {
-    const hue = (id * 137.508) % 360;
-    return ` style="color: hsl(${hue.toFixed(0)}, 65%, 48%)"`;
-  }
-  return "";
-}
+// CodeMirror plumbing for "swap the current decoration set". Decorations
+// already in the field are remapped through document changes automatically,
+// so a stale set still tracks the right text positions until we replace it.
+const setHighlights = StateEffect.define();
+const highlightField = StateField.define({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setHighlights)) return e.value;
+    }
+    return value;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
-function renderHighlighted(targetEl, text, parsed) {
-  if (!parsed.ok || !parsed.spans) {
-    renderPlain(targetEl, text);
-    return;
-  }
-  const spans = parsed.spans.slice().sort((a, b) => a.s - b.s || a.e - b.e);
+function buildDecorations(text, parsed) {
+  if (!parsed || !parsed.ok || !parsed.spans) return Decoration.none;
   const byteToChar = buildByteToChar(text);
   const charLen = text.length;
-  const at = (byteOff) => {
-    if (byteOff <= 0) return 0;
-    if (byteOff >= byteToChar.length) return charLen;
-    return byteToChar[byteOff];
-  };
+  const at = (b) =>
+    b <= 0 ? 0 : b >= byteToChar.length ? charLen : byteToChar[b];
 
-  let html = "";
-  let cursor = 0;
-  for (const sp of spans) {
-    const s = at(sp.s);
-    const e = at(sp.e);
-    if (e <= cursor || s >= charLen) continue;
-    if (s > cursor) html += escapeHtml(text.slice(cursor, s));
-    const clampedStart = Math.max(s, cursor);
-    const segment = text.slice(clampedStart, Math.min(e, charLen));
-    const dataAttr = sp.i != null ? ` data-vid="${sp.i}"` : "";
-    html += `<span class="tk-${sp.k}"${dataAttr}${styleFor(sp.k, sp.i)}>${escapeHtml(segment)}</span>`;
-    cursor = Math.max(cursor, e);
+  const decos = parsed.spans
+    .map((sp) => ({ s: at(sp.s), e: at(sp.e), k: sp.k, i: sp.i }))
+    .filter((d) => d.e > d.s && d.s < charLen)
+    .sort((a, b) => a.s - b.s || a.e - b.e);
+
+  const builder = new RangeSetBuilder();
+  let lastEnd = 0;
+  for (const d of decos) {
+    if (d.s < lastEnd) continue; // skip overlapping spans
+    const attrs = {};
+    if (d.i != null) attrs["data-vid"] = String(d.i);
+    if ((d.k === "val-def" || d.k === "val-use") && d.i != null) {
+      const hue = (d.i * 137.508) % 360;
+      attrs.style = `color: hsl(${hue.toFixed(0)}, 65%, 48%)`;
+    }
+    builder.add(
+      d.s,
+      d.e,
+      Decoration.mark({ class: `tk-${d.k}`, attributes: attrs }),
+    );
+    lastEnd = d.e;
   }
-  if (cursor < text.length) html += escapeHtml(text.slice(cursor));
-  if (text.endsWith("\n")) html += " ";
-  targetEl.innerHTML = html;
+  return builder.finish();
 }
 
-function wireValueHover(el) {
+// Bound after the wasm highlighter is initialised; until then it's a no-op so
+// the editors stay usable as plain text boxes.
+let highlight = () => null;
+
+function applyHighlight(view, errEl) {
+  const text = view.state.doc.toString();
+  const parsed = highlight(text);
+  if (parsed && !parsed.ok) {
+    view.dispatch({ effects: setHighlights.of(Decoration.none) });
+    showError(errEl, parsed.err || "parse failed");
+    return;
+  }
+  view.dispatch({
+    effects: setHighlights.of(buildDecorations(text, parsed)),
+  });
+  showError(errEl, null);
+}
+
+// ---------------------------------------------------------------------------
+// Hover: highlight every span sharing a data-vid with the one under the
+// pointer. Lives directly on the editor's contentDOM so CodeMirror's own
+// re-rendering doesn't trip it up.
+
+function wireValueHover(view) {
   let lastVid = null;
-  el.addEventListener("mousemove", (e) => {
+  const dom = view.contentDOM;
+  dom.addEventListener("mousemove", (e) => {
     const t = e.target.closest("[data-vid]");
     const vid = t ? t.dataset.vid : null;
     if (vid === lastVid) return;
     if (lastVid != null) {
-      el.querySelectorAll(".vhl").forEach((n) => n.classList.remove("vhl"));
+      dom.querySelectorAll(".vhl").forEach((n) => n.classList.remove("vhl"));
     }
     if (vid != null) {
-      el.querySelectorAll(`[data-vid="${vid}"]`).forEach((n) =>
-        n.classList.add("vhl"),
-      );
+      dom
+        .querySelectorAll(`[data-vid="${vid}"]`)
+        .forEach((n) => n.classList.add("vhl"));
     }
     lastVid = vid;
   });
-  el.addEventListener("mouseleave", () => {
-    el.querySelectorAll(".vhl").forEach((n) => n.classList.remove("vhl"));
+  dom.addEventListener("mouseleave", () => {
+    dom.querySelectorAll(".vhl").forEach((n) => n.classList.remove("vhl"));
     lastVid = null;
   });
 }
 
 // ---------------------------------------------------------------------------
-// Wasm load. If this fails, the editor stays usable as a plain text box.
+// Editor construction.
+
+const INITIAL_INPUT = `func.func @demo(%a: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %0 = arith.addi %a, %c0 : i32
+  %1 = arith.addi %a, %c0 : i32
+  %2 = arith.addi %0, %1 : i32
+  return %2 : i32
+}
+`;
+
+function makeEditor({ parent, doc, editable, onChange }) {
+  const extensions = [
+    basicSetup,
+    indentUnit.of("  "),
+    EditorView.lineWrapping,
+    highlightField,
+  ];
+  if (editable) {
+    extensions.push(keymap.of([indentWithTab]));
+  } else {
+    extensions.push(EditorState.readOnly.of(true));
+  }
+  if (onChange) {
+    let debounce = null;
+    extensions.push(
+      EditorView.updateListener.of((u) => {
+        if (!u.docChanged) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(onChange, 250);
+      }),
+    );
+  }
+  const view = new EditorView({
+    state: EditorState.create({ doc, extensions }),
+    parent,
+  });
+  wireValueHover(view);
+  return view;
+}
+
+const inputView = makeEditor({
+  parent: $("input-editor"),
+  doc: INITIAL_INPUT,
+  editable: true,
+  onChange: () => applyHighlight(inputView, inputErr),
+});
+
+const outputView = makeEditor({
+  parent: $("output-editor"),
+  doc: "",
+  editable: false,
+});
+
+// ---------------------------------------------------------------------------
+// Wasm load. If anything fails the editors stay usable as plain text boxes.
 
 let wasmModule = null;
 let runnerInstantiate = null;
 
 try {
+  const { default: MlirOpt } = await import("./mlir-opt.mjs");
   const res = await fetch("./mlir-opt.wasm");
   if (!res.ok) throw new Error(`fetch mlir-opt.wasm: HTTP ${res.status}`);
   const wasmBytes = await res.arrayBuffer();
@@ -221,44 +298,42 @@ try {
 
   statusEl.textContent = `Ready. mlir-opt.wasm: ${(wasmBytes.byteLength / 1e6).toFixed(1)} MB.`;
   runEl.disabled = false;
-  updateInputHighlight();
+  applyHighlight(inputView, inputErr);
 } catch (e) {
   statusEl.textContent =
     `Failed to load mlir-opt.wasm (${e?.message ?? e}). ` +
-    `Editor still works as a plain text box.`;
+    `Editors still work as plain text boxes.`;
   runEl.disabled = true;
 }
 
 // ---------------------------------------------------------------------------
-// Output pane / Run.
+// Run.
+
+function replaceOutputDoc(text) {
+  outputView.dispatch({
+    changes: { from: 0, to: outputView.state.doc.length, insert: text },
+  });
+}
 
 function setOutput(text) {
+  replaceOutputDoc(text || "");
   if (!text) {
-    renderPlain(outputHl, "");
+    outputView.dispatch({ effects: setHighlights.of(Decoration.none) });
     showError(outputErr, null);
     return;
   }
-  const parsed = highlight(text);
-  if (!parsed) {
-    renderPlain(outputHl, text);
-    showError(outputErr, null);
-    return;
-  }
-  renderHighlighted(outputHl, text, parsed);
-  showError(outputErr, parsed.ok ? null : parsed.err);
+  applyHighlight(outputView, outputErr);
 }
 
 async function run() {
   if (!runnerInstantiate) return;
   runEl.disabled = true;
   logEl.textContent = "";
-  renderPlain(outputHl, "");
-  showError(outputErr, null);
+  setOutput("");
   const t0 = performance.now();
 
   const mod = await runnerInstantiate();
-
-  mod.FS.writeFile("/input.mlir", inputTa.value);
+  mod.FS.writeFile("/input.mlir", inputView.state.doc.toString());
 
   const args = $("args").value.split(/\s+/).filter(Boolean);
   let rc = "?";
