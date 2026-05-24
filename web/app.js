@@ -111,6 +111,22 @@ const highlightField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+// Separate field for whole-line backgrounds used by the cross-pane op linker.
+// Kept apart from the mark-decoration field above because line decorations
+// need to be added in line-start order, which the highlighter spans aren't.
+const setOpLines = StateEffect.define();
+const opLineField = StateField.define({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setOpLines)) return e.value;
+    }
+    return value;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 function buildDecorations(text, parsed, activated) {
   if (!parsed || !parsed.ok || !parsed.spans) return Decoration.none;
   const byteToChar = buildByteToChar(text);
@@ -119,7 +135,7 @@ function buildDecorations(text, parsed, activated) {
     b <= 0 ? 0 : b >= byteToChar.length ? charLen : byteToChar[b];
 
   const decos = parsed.spans
-    .map((sp) => ({ s: at(sp.s), e: at(sp.e), k: sp.k, i: sp.i }))
+    .map((sp) => ({ s: at(sp.s), e: at(sp.e), k: sp.k, i: sp.i, loc: sp.loc }))
     .filter((d) => d.e > d.s && d.s < charLen)
     .sort((a, b) => a.s - b.s || a.e - b.e);
 
@@ -129,6 +145,11 @@ function buildDecorations(text, parsed, activated) {
     if (d.s < lastEnd) continue; // skip overlapping spans
     const attrs = {};
     if (d.i != null) attrs["data-vid"] = String(d.i);
+    if (d.k === "op" && d.loc && d.loc.length) {
+      // Serialise as a |-separated list; data attributes carry strings only
+      // and this stays cheap to split on click.
+      attrs["data-loc"] = d.loc.join("|");
+    }
     if (
       (d.k === "val-def" || d.k === "val-use") &&
       d.i != null &&
@@ -149,12 +170,14 @@ function buildDecorations(text, parsed, activated) {
 }
 
 // Bound after the wasm highlighter is initialised; until then it's a no-op so
-// the editors stay usable as plain text boxes.
+// the editors stay usable as plain text boxes. `highlightClean` is used for
+// the runner output: it strips loc(...) annotations and returns clean text.
 let highlight = () => null;
+let highlightClean = () => null;
 
-// Per-view click state: which value ids the user has activated (clicked) and
-// a cache of the last parse so a click can rebuild decorations without
-// re-running the wasm highlighter.
+// Per-view state. `activated` tracks SSA-value vids the user clicked (for
+// per-value colouring); `text`/`parsed` cache the last successful parse so
+// click handlers can rebuild decorations without re-running wasm.
 const viewState = new WeakMap();
 function stateFor(view) {
   let s = viewState.get(view);
@@ -165,29 +188,130 @@ function stateFor(view) {
   return s;
 }
 
-function applyHighlight(view, errEl) {
-  const text = view.state.doc.toString();
-  const parsed = highlight(text);
+function applyHighlightOf(view, errEl, parsed, text) {
   const s = stateFor(view);
   s.text = text;
   s.parsed = parsed;
   if (parsed && !parsed.ok) {
-    view.dispatch({ effects: setHighlights.of(Decoration.none) });
+    view.dispatch({
+      effects: [
+        setHighlights.of(Decoration.none),
+        setOpLines.of(Decoration.none),
+      ],
+    });
     showError(errEl, parsed.err || "parse failed");
     return;
   }
   view.dispatch({
-    effects: setHighlights.of(buildDecorations(text, parsed, s.activated)),
+    effects: [
+      setHighlights.of(buildDecorations(text, parsed, s.activated)),
+      setOpLines.of(buildOpLineDecorations(view, text, parsed)),
+    ],
   });
   showError(errEl, null);
+}
+
+function applyHighlight(view, errEl) {
+  const text = view.state.doc.toString();
+  applyHighlightOf(view, errEl, highlight(text), text);
 }
 
 function refreshDecorations(view) {
   const s = stateFor(view);
   if (!s.parsed || !s.parsed.ok) return;
   view.dispatch({
-    effects: setHighlights.of(buildDecorations(s.text, s.parsed, s.activated)),
+    effects: [
+      setHighlights.of(buildDecorations(s.text, s.parsed, s.activated)),
+      setOpLines.of(buildOpLineDecorations(view, s.text, s.parsed)),
+    ],
   });
+}
+
+// ---------------------------------------------------------------------------
+// Cross-pane op linking. Clicking an op in either editor toggles a shared
+// activation keyed by that op's source-location set; every op in either pane
+// that shares at least one key gets a whole-line background in a colour
+// derived from the activation. Many-to-one and one-to-many fall out naturally
+// because each op may carry multiple location keys (FusedLoc) and each
+// activation may carry multiple keys.
+
+// Module-level state shared by both editors.
+const linkActivations = new Map(); // signature -> { keys: string[], hue: number }
+let nextLinkHueIdx = 0;
+const linkedViews = []; // views participating in linking
+
+function nextLinkHue() {
+  return ((nextLinkHueIdx++) * 137.508) % 360;
+}
+
+// For a given op-span (kind === "op" with non-empty loc), pick a colour by
+// scanning every active activation. We return the colour of the *first*
+// activation whose key set overlaps; multi-colour overlap is rare and not
+// worth the visual noise of a gradient.
+function colorForLocs(locs) {
+  for (const { keys, hue } of linkActivations.values()) {
+    for (const k of locs) {
+      if (keys.includes(k)) return hue;
+    }
+  }
+  return null;
+}
+
+function buildOpLineDecorations(view, text, parsed) {
+  if (!parsed || !parsed.ok || !parsed.spans) return Decoration.none;
+  if (linkActivations.size === 0) return Decoration.none;
+
+  const byteToChar = buildByteToChar(text);
+  const charLen = text.length;
+  const at = (b) =>
+    b <= 0 ? 0 : b >= byteToChar.length ? charLen : byteToChar[b];
+
+  // Map lineStart → hue. First op on a line wins if multiple ops share
+  // the line (rare, but possible with terse IR).
+  const byLine = new Map();
+  for (const sp of parsed.spans) {
+    if (sp.k !== "op" || !sp.loc || sp.loc.length === 0) continue;
+    const hue = colorForLocs(sp.loc);
+    if (hue == null) continue;
+    const ch = at(sp.s);
+    if (ch >= charLen) continue;
+    const line = view.state.doc.lineAt(ch);
+    if (!byLine.has(line.from)) byLine.set(line.from, hue);
+  }
+
+  if (byLine.size === 0) return Decoration.none;
+  const sorted = [...byLine.entries()].sort((a, b) => a[0] - b[0]);
+  const builder = new RangeSetBuilder();
+  for (const [from, hue] of sorted) {
+    builder.add(
+      from,
+      from,
+      Decoration.line({
+        attributes: {
+          style: `background-color: hsla(${hue.toFixed(0)}, 70%, 55%, 0.18)`,
+        },
+      }),
+    );
+  }
+  return builder.finish();
+}
+
+function refreshAllOpLines() {
+  for (const view of linkedViews) {
+    const s = stateFor(view);
+    if (!s.parsed || !s.parsed.ok) continue;
+    view.dispatch({
+      effects: setOpLines.of(buildOpLineDecorations(view, s.text, s.parsed)),
+    });
+  }
+}
+
+function toggleLocLink(locs) {
+  if (!locs || locs.length === 0) return;
+  const sig = [...locs].sort().join("|");
+  if (linkActivations.has(sig)) linkActivations.delete(sig);
+  else linkActivations.set(sig, { keys: [...locs], hue: nextLinkHue() });
+  refreshAllOpLines();
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +319,7 @@ function refreshDecorations(view) {
 // pointer. Lives directly on the editor's contentDOM so CodeMirror's own
 // re-rendering doesn't trip it up.
 
-function wireValueHover(view) {
+function wireInteractions(view) {
   let lastVid = null;
   const dom = view.contentDOM;
   dom.addEventListener("mousemove", (e) => {
@@ -216,13 +340,21 @@ function wireValueHover(view) {
     dom.querySelectorAll(".vhl").forEach((n) => n.classList.remove("vhl"));
     lastVid = null;
   });
-  // Click a value to toggle its persistent color. Cursor positioning still
-  // happens; we just rebuild decorations with the updated activated set.
+  // Click handling: an op-name click toggles cross-pane line linking; a
+  // value click toggles a persistent per-value colour. Op linking takes
+  // priority when the click happened on a span that carries both (it
+  // shouldn't in practice — op names and SSA values are disjoint).
   dom.addEventListener("mouseup", (e) => {
     if (e.button !== 0) return;
-    const t = e.target.closest("[data-vid]");
-    if (!t) return;
-    const vid = t.dataset.vid;
+    const tloc = e.target.closest("[data-loc]");
+    if (tloc) {
+      const locs = tloc.dataset.loc.split("|").filter(Boolean);
+      toggleLocLink(locs);
+      return;
+    }
+    const tvid = e.target.closest("[data-vid]");
+    if (!tvid) return;
+    const vid = tvid.dataset.vid;
     const s = stateFor(view);
     if (s.activated.has(vid)) s.activated.delete(vid);
     else s.activated.add(vid);
@@ -247,6 +379,7 @@ function makeEditor({ parent, doc, editable, onChange }) {
     basicSetup,
     indentUnit.of("  "),
     EditorView.lineWrapping,
+    opLineField,
     highlightField,
   ];
   if (editable) {
@@ -268,7 +401,8 @@ function makeEditor({ parent, doc, editable, onChange }) {
     state: EditorState.create({ doc, extensions }),
     parent,
   });
-  wireValueHover(view);
+  wireInteractions(view);
+  linkedViews.push(view);
   return view;
 }
 
@@ -291,9 +425,15 @@ const outputView = makeEditor({
 let wasmModule = null;
 let runnerInstantiate = null;
 
+// Cache-bust the wasm artifacts every page load. Nix store mtimes are all
+// 1970-01-01 so browsers happily serve stale mjs/wasm from disk cache across
+// rebuilds, which would silently keep an older `_mlir_highlight*` export
+// surface alive. A query-string suffix forces a fresh fetch.
+const cacheBust = `?v=${Date.now()}`;
+
 try {
-  const { default: MlirOpt } = await import("./mlir-opt.mjs");
-  const res = await fetch("./mlir-opt.wasm");
+  const { default: MlirOpt } = await import("./mlir-opt.mjs" + cacheBust);
+  const res = await fetch("./mlir-opt.wasm" + cacheBust);
   if (!res.ok) throw new Error(`fetch mlir-opt.wasm: HTTP ${res.status}`);
   const wasmBytes = await res.arrayBuffer();
   wasmModule = await WebAssembly.compile(wasmBytes);
@@ -323,19 +463,22 @@ try {
     },
   });
 
-  highlight = (text) => {
+  const callHl = (sym, text) => {
     try {
-      const ptr = hlMod.ccall("mlir_highlight", "number", ["string"], [text]);
-      if (!ptr) return { ok: false, err: "highlighter returned null" };
+      const ptr = hlMod.ccall(sym, "number", ["string"], [text]);
+      if (!ptr) return { ok: false, err: `${sym} returned null` };
       try {
         return JSON.parse(hlMod.UTF8ToString(ptr));
       } finally {
         hlMod._free(ptr);
       }
     } catch (e) {
-      return { ok: false, err: "highlighter threw: " + (e?.message ?? e) };
+      return { ok: false, err: `${sym} threw: ` + (e?.message ?? e) };
     }
   };
+
+  highlight = (text) => callHl("mlir_highlight", text);
+  highlightClean = (text) => callHl("mlir_highlight_clean", text);
 
   statusEl.textContent = `Ready. mlir-opt.wasm: ${(wasmBytes.byteLength / 1e6).toFixed(1)} MB.`;
   runEl.disabled = false;
@@ -356,27 +499,55 @@ function replaceOutputDoc(text) {
   });
 }
 
-function setOutput(text) {
-  replaceOutputDoc(text || "");
-  if (!text) {
-    outputView.dispatch({ effects: setHighlights.of(Decoration.none) });
+function setOutputRaw(rawText) {
+  if (!rawText) {
+    replaceOutputDoc("");
+    outputView.dispatch({
+      effects: [
+        setHighlights.of(Decoration.none),
+        setOpLines.of(Decoration.none),
+      ],
+    });
     showError(outputErr, null);
     return;
   }
-  applyHighlight(outputView, outputErr);
+  // Run the clean-highlighter: it parses the debug-info'd text, strips the
+  // loc(...) annotations, and returns clean text plus spans tied to it. We
+  // only ever show the clean text to the user.
+  const parsed = highlightClean(rawText);
+  if (parsed && parsed.ok && typeof parsed.text === "string") {
+    replaceOutputDoc(parsed.text);
+    applyHighlightOf(outputView, outputErr, parsed, parsed.text);
+  } else {
+    // Stripping failed; fall back to showing the raw text (with locs visible)
+    // so the user still sees output rather than a blank pane.
+    replaceOutputDoc(rawText);
+    applyHighlight(outputView, outputErr);
+    if (parsed && parsed.err) showError(outputErr, parsed.err);
+  }
 }
 
 async function run() {
   if (!runnerInstantiate) return;
   runEl.disabled = true;
   logEl.textContent = "";
-  setOutput("");
+  setOutputRaw("");
   const t0 = performance.now();
 
   const mod = await runnerInstantiate();
   mod.FS.writeFile("/input.mlir", inputView.state.doc.toString());
 
+  // Force debuginfo so the printed IR carries loc(...) annotations; the
+  // clean-highlighter then strips them before display. Don't add the flag
+  // twice if the user already supplied it.
   const args = $("args").value.split(/\s+/).filter(Boolean);
+  if (
+    !args.includes("-mlir-print-debuginfo") &&
+    !args.includes("--mlir-print-debuginfo")
+  ) {
+    args.push("-mlir-print-debuginfo");
+  }
+
   let rc = "?";
   try {
     rc = mod.callMain([...args, "/input.mlir", "-o", "/output.mlir"]);
@@ -391,7 +562,7 @@ async function run() {
     log("[no output file] " + (e?.message ?? e));
   }
 
-  setOutput(outText);
+  setOutputRaw(outText);
   log(`exit=${rc} (${(performance.now() - t0).toFixed(0)} ms)`);
   runEl.disabled = false;
 }
