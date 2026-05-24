@@ -111,7 +111,7 @@ const highlightField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-function buildDecorations(text, parsed) {
+function buildDecorations(text, parsed, activated) {
   if (!parsed || !parsed.ok || !parsed.spans) return Decoration.none;
   const byteToChar = buildByteToChar(text);
   const charLen = text.length;
@@ -129,7 +129,12 @@ function buildDecorations(text, parsed) {
     if (d.s < lastEnd) continue; // skip overlapping spans
     const attrs = {};
     if (d.i != null) attrs["data-vid"] = String(d.i);
-    if ((d.k === "val-def" || d.k === "val-use") && d.i != null) {
+    if (
+      (d.k === "val-def" || d.k === "val-use") &&
+      d.i != null &&
+      activated &&
+      activated.has(String(d.i))
+    ) {
       const hue = (d.i * 137.508) % 360;
       attrs.style = `color: hsl(${hue.toFixed(0)}, 65%, 48%)`;
     }
@@ -147,18 +152,42 @@ function buildDecorations(text, parsed) {
 // the editors stay usable as plain text boxes.
 let highlight = () => null;
 
+// Per-view click state: which value ids the user has activated (clicked) and
+// a cache of the last parse so a click can rebuild decorations without
+// re-running the wasm highlighter.
+const viewState = new WeakMap();
+function stateFor(view) {
+  let s = viewState.get(view);
+  if (!s) {
+    s = { activated: new Set(), text: "", parsed: null };
+    viewState.set(view, s);
+  }
+  return s;
+}
+
 function applyHighlight(view, errEl) {
   const text = view.state.doc.toString();
   const parsed = highlight(text);
+  const s = stateFor(view);
+  s.text = text;
+  s.parsed = parsed;
   if (parsed && !parsed.ok) {
     view.dispatch({ effects: setHighlights.of(Decoration.none) });
     showError(errEl, parsed.err || "parse failed");
     return;
   }
   view.dispatch({
-    effects: setHighlights.of(buildDecorations(text, parsed)),
+    effects: setHighlights.of(buildDecorations(text, parsed, s.activated)),
   });
   showError(errEl, null);
+}
+
+function refreshDecorations(view) {
+  const s = stateFor(view);
+  if (!s.parsed || !s.parsed.ok) return;
+  view.dispatch({
+    effects: setHighlights.of(buildDecorations(s.text, s.parsed, s.activated)),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +215,18 @@ function wireValueHover(view) {
   dom.addEventListener("mouseleave", () => {
     dom.querySelectorAll(".vhl").forEach((n) => n.classList.remove("vhl"));
     lastVid = null;
+  });
+  // Click a value to toggle its persistent color. Cursor positioning still
+  // happens; we just rebuild decorations with the updated activated set.
+  dom.addEventListener("mouseup", (e) => {
+    if (e.button !== 0) return;
+    const t = e.target.closest("[data-vid]");
+    if (!t) return;
+    const vid = t.dataset.vid;
+    const s = stateFor(view);
+    if (s.activated.has(vid)) s.activated.delete(vid);
+    else s.activated.add(vid);
+    refreshDecorations(view);
   });
 }
 
