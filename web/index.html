@@ -11,8 +11,87 @@
     .controls { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
     .controls input { flex: 1; font-family: ui-monospace, monospace; padding: 0.3rem; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-    textarea { width: 100%; height: 20rem; font-family: ui-monospace, monospace; box-sizing: border-box; }
-    pre { background: rgba(127,127,127,0.1); padding: 0.5rem; height: 10rem; overflow: auto; margin: 0; font-family: ui-monospace, monospace; white-space: pre-wrap; }
+
+    /* Editor: a transparent textarea layered on top of a syntax-highlighted
+       <pre>. The textarea owns the caret and selection; the <pre> shows the
+       colors. They must use identical font/padding/whitespace settings so the
+       text positions line up. */
+    .editor {
+      position: relative;
+      height: 22rem;
+      border: 1px solid rgba(127,127,127,0.4);
+      border-radius: 3px;
+      overflow: hidden;
+      background: rgba(127,127,127,0.06);
+    }
+    .editor > .layer {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      padding: 0.5rem;
+      box-sizing: border-box;
+      font: 0.9rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+      tab-size: 2;
+    }
+    .editor > .hl {
+      pointer-events: none;
+      color: rgb(40, 40, 40);
+      background: transparent;
+      z-index: 0;
+    }
+    @media (prefers-color-scheme: dark) {
+      .editor > .hl { color: rgb(220, 220, 220); }
+    }
+    .editor > textarea {
+      background: transparent;
+      color: transparent;
+      caret-color: currentColor;
+      border: none;
+      outline: none;
+      resize: none;
+      z-index: 1;
+    }
+    .editor > textarea::selection { background: rgba(100, 150, 220, 0.35); color: transparent; }
+    .editor.readonly { background: rgba(127,127,127,0.04); }
+    .editor.readonly > .hl { user-select: text; pointer-events: auto; }
+
+    /* Token styles. Operations are bold; SSA-value colors come from inline
+       `style="color: hsl(...)"` so they stay distinct without a fixed palette. */
+    .tk-op { font-weight: 600; }
+    .tk-val-def, .tk-val-use { /* color comes from inline style */ }
+    .tk-blk-def, .tk-blk-use { color: #c5762a; font-style: italic; }
+    .tk-sym-use { color: #2a9d8f; }
+    .tk-attr-alias-def, .tk-attr-alias-use { color: #7a4fb8; }
+    .tk-type-alias-def, .tk-type-alias-use { color: #2a72c5; }
+    .vhl { background: rgba(255, 215, 0, 0.25); border-radius: 2px; }
+
+    .err {
+      font-family: ui-monospace, monospace;
+      font-size: 0.8rem;
+      color: #c0392b;
+      background: rgba(192, 57, 43, 0.08);
+      padding: 0.4rem 0.6rem;
+      margin: 0.25rem 0 0;
+      border-radius: 3px;
+      white-space: pre-wrap;
+      max-height: 8rem;
+      overflow: auto;
+      display: none;
+    }
+    .err.shown { display: block; }
+
+    pre#log {
+      background: rgba(127,127,127,0.1);
+      padding: 0.5rem;
+      height: 10rem;
+      overflow: auto;
+      margin: 0;
+      font-family: ui-monospace, monospace;
+      white-space: pre-wrap;
+    }
     #status { font-style: italic; opacity: 0.7; margin: 0.25rem 0; }
     button { padding: 0.35rem 1rem; }
   </style>
@@ -28,7 +107,9 @@
   <div class="row">
     <div>
       <h2>Input MLIR</h2>
-      <textarea id="input">func.func @demo(%a: i32) -> i32 {
+      <div class="editor" id="input-editor">
+        <pre class="layer hl" id="input-hl" aria-hidden="true"></pre>
+        <textarea class="layer" id="input" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off">func.func @demo(%a: i32) -> i32 {
   %c0 = arith.constant 0 : i32
   %0 = arith.addi %a, %c0 : i32
   %1 = arith.addi %a, %c0 : i32
@@ -36,10 +117,15 @@
   return %2 : i32
 }
 </textarea>
+      </div>
+      <pre class="err" id="input-err"></pre>
     </div>
     <div>
       <h2>Output</h2>
-      <textarea id="output" readonly></textarea>
+      <div class="editor readonly" id="output-editor">
+        <pre class="layer hl" id="output-hl"></pre>
+      </div>
+      <pre class="err" id="output-err"></pre>
     </div>
   </div>
   <h2>Log</h2>

@@ -3,7 +3,8 @@
 #
 # Usage:
 #   nix build .#site
-#   python3 web/serve.py result/
+#   python3 web/serve.py          # defaults to ./result if present
+#   python3 web/serve.py result/  # or pass an explicit directory
 #
 # Then open http://localhost:8000/.
 
@@ -15,8 +16,16 @@ import sys
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-if len(sys.argv) > 1:
-    os.chdir(sys.argv[1])
+target = sys.argv[1] if len(sys.argv) > 1 else (
+    "result" if os.path.isdir("result") else None
+)
+if target is None:
+    sys.exit(
+        "no directory given and ./result not found — run `nix build` first, "
+        "or pass an explicit path"
+    )
+print(f"serving {os.path.abspath(target)}", file=sys.stderr)
+os.chdir(target)
 
 http.server.test(
     HandlerClass=http.server.SimpleHTTPRequestHandler,
