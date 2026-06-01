@@ -170,10 +170,9 @@ function buildDecorations(text, parsed, activated) {
 }
 
 // Bound after the wasm highlighter is initialised; until then it's a no-op so
-// the editors stay usable as plain text boxes. `highlightClean` is used for
-// the runner output: it strips loc(...) annotations and returns clean text.
+// the editors stay usable as plain text boxes.
 let highlight = () => null;
-let highlightClean = () => null;
+let mlirOptRun = () => null;
 
 // Per-view state. `activated` tracks SSA-value vids the user clicked (for
 // per-value colouring); `text`/`parsed` cache the last successful parse so
@@ -423,7 +422,6 @@ const outputView = makeEditor({
 // Wasm load. If anything fails the editors stay usable as plain text boxes.
 
 let wasmModule = null;
-let runnerInstantiate = null;
 
 // Cache-bust the wasm artifacts every page load. Nix store mtimes are all
 // 1970-01-01 so browsers happily serve stale mjs/wasm from disk cache across
@@ -438,24 +436,14 @@ try {
   const wasmBytes = await res.arrayBuffer();
   wasmModule = await WebAssembly.compile(wasmBytes);
 
-  runnerInstantiate = () =>
-    MlirOpt({
-      noInitialRun: true,
-      print: log,
-      printErr: log,
-      instantiateWasm(imports, callback) {
-        WebAssembly.instantiate(wasmModule, imports).then((inst) =>
-          callback(inst),
-        );
-      },
-    });
-
-  // Persistent highlighter instance: never calls _main, so the runtime stays
-  // alive and `_mlir_highlight` can be re-entered as often as we like.
+  // Single persistent module instance: never calls _main, so the runtime
+  // stays alive and the exported C functions can be re-entered as often as
+  // we like. The runner itself is also an exported function (`mlir_opt_run`)
+  // that drives parse + pass pipeline + print in-process — no callMain.
   const hlMod = await MlirOpt({
     noInitialRun: true,
-    print: () => {},
-    printErr: () => {},
+    print: log,
+    printErr: log,
     instantiateWasm(imports, callback) {
       WebAssembly.instantiate(wasmModule, imports).then((inst) =>
         callback(inst),
@@ -463,9 +451,14 @@ try {
     },
   });
 
-  const callHl = (sym, text) => {
+  const callJson = (sym, args) => {
     try {
-      const ptr = hlMod.ccall(sym, "number", ["string"], [text]);
+      const ptr = hlMod.ccall(
+        sym,
+        "number",
+        args.map(() => "string"),
+        args,
+      );
       if (!ptr) return { ok: false, err: `${sym} returned null` };
       try {
         return JSON.parse(hlMod.UTF8ToString(ptr));
@@ -477,8 +470,8 @@ try {
     }
   };
 
-  highlight = (text) => callHl("mlir_highlight", text);
-  highlightClean = (text) => callHl("mlir_highlight_clean", text);
+  highlight = (text) => callJson("mlir_highlight", [text]);
+  mlirOptRun = (text, args) => callJson("mlir_opt_run", [text, args]);
 
   statusEl.textContent = `Ready. mlir-opt.wasm: ${(wasmBytes.byteLength / 1e6).toFixed(1)} MB.`;
   runEl.disabled = false;
@@ -499,71 +492,38 @@ function replaceOutputDoc(text) {
   });
 }
 
-function setOutputRaw(rawText) {
-  if (!rawText) {
-    replaceOutputDoc("");
-    outputView.dispatch({
-      effects: [
-        setHighlights.of(Decoration.none),
-        setOpLines.of(Decoration.none),
-      ],
-    });
-    showError(outputErr, null);
-    return;
-  }
-  // Run the clean-highlighter: it parses the debug-info'd text, strips the
-  // loc(...) annotations, and returns clean text plus spans tied to it. We
-  // only ever show the clean text to the user.
-  const parsed = highlightClean(rawText);
-  if (parsed && parsed.ok && typeof parsed.text === "string") {
-    replaceOutputDoc(parsed.text);
-    applyHighlightOf(outputView, outputErr, parsed, parsed.text);
-  } else {
-    // Stripping failed; fall back to showing the raw text (with locs visible)
-    // so the user still sees output rather than a blank pane.
-    replaceOutputDoc(rawText);
-    applyHighlight(outputView, outputErr);
-    if (parsed && parsed.err) showError(outputErr, parsed.err);
-  }
+function clearOutput() {
+  replaceOutputDoc("");
+  outputView.dispatch({
+    effects: [
+      setHighlights.of(Decoration.none),
+      setOpLines.of(Decoration.none),
+    ],
+  });
+  showError(outputErr, null);
 }
 
 async function run() {
-  if (!runnerInstantiate) return;
   runEl.disabled = true;
   logEl.textContent = "";
-  setOutputRaw("");
+  clearOutput();
   const t0 = performance.now();
 
-  const mod = await runnerInstantiate();
-  mod.FS.writeFile("/input.mlir", inputView.state.doc.toString());
+  // Drive the pipeline in-process via `mlir_opt_run`. The user's args (e.g.
+  // --mlir-print-debuginfo, --canonicalize) decide both the pass pipeline
+  // and whether the printed output carries loc(...) annotations. Cross-pane
+  // linking is sourced from the in-memory module's Locations, so it keeps
+  // working regardless of the debug-info preference.
+  const args = $("args").value;
+  const parsed = mlirOptRun(inputView.state.doc.toString(), args);
 
-  // Force debuginfo so the printed IR carries loc(...) annotations; the
-  // clean-highlighter then strips them before display. Don't add the flag
-  // twice if the user already supplied it.
-  const args = $("args").value.split(/\s+/).filter(Boolean);
-  if (
-    !args.includes("-mlir-print-debuginfo") &&
-    !args.includes("--mlir-print-debuginfo")
-  ) {
-    args.push("-mlir-print-debuginfo");
+  if (!parsed || !parsed.ok) {
+    showError(outputErr, parsed?.err || "opt run failed");
+  } else {
+    replaceOutputDoc(parsed.text);
+    applyHighlightOf(outputView, outputErr, parsed, parsed.text);
   }
-
-  let rc = "?";
-  try {
-    rc = mod.callMain([...args, "/input.mlir", "-o", "/output.mlir"]);
-  } catch (e) {
-    log("[exception] " + (e?.message ?? e));
-  }
-
-  let outText = "";
-  try {
-    outText = mod.FS.readFile("/output.mlir", { encoding: "utf8" });
-  } catch (e) {
-    log("[no output file] " + (e?.message ?? e));
-  }
-
-  setOutputRaw(outText);
-  log(`exit=${rc} (${(performance.now() - t0).toFixed(0)} ms)`);
+  log(`(${(performance.now() - t0).toFixed(0)} ms)`);
   runEl.disabled = false;
 }
 

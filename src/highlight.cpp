@@ -7,33 +7,44 @@
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "mlir/InitAllDialects.h"
+#include "mlir/InitAllPasses.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
+#include <vector>
 
 using namespace mlir;
 
 namespace {
 
 // One context per wasm module instance, lazily initialised on first call.
+// Passes are registered too so the same context can drive `mlir_opt_run`.
 MLIRContext &getHighlightContext() {
   static MLIRContext *ctx = []() {
+    registerAllPasses();
     DialectRegistry registry;
     registerAllDialects(registry);
     auto *c = new MLIRContext(registry);
@@ -245,83 +256,164 @@ extern "C" char *mlir_highlight(const char *input) {
   return toHeapString(out);
 }
 
-// Same as `mlir_highlight`, but tailored for the mlir-opt runner output: the
-// caller passes text that contains `loc(...)` debug annotations, we parse it
-// to capture every op's source location, then re-print *without* debug info
-// so the user never sees the annotations. The returned JSON includes the
-// stripped text under "text" and spans that index into it.
-extern "C" char *mlir_highlight_clean(const char *input) {
+// Tokenize a whitespace-separated argument string.
+static void tokenizeArgs(llvm::StringRef args,
+                         std::vector<std::string> &out) {
+  size_t i = 0;
+  while (i < args.size()) {
+    while (i < args.size() &&
+           std::isspace(static_cast<unsigned char>(args[i])))
+      ++i;
+    if (i >= args.size()) break;
+    size_t start = i;
+    while (i < args.size() &&
+           !std::isspace(static_cast<unsigned char>(args[i])))
+      ++i;
+    out.emplace_back(args.slice(start, i).str());
+  }
+}
+
+// Strip leading "--" or "-" from a flag.
+static llvm::StringRef stripDashes(llvm::StringRef s) {
+  if (s.starts_with("--")) return s.drop_front(2);
+  if (s.starts_with("-")) return s.drop_front(1);
+  return s;
+}
+
+// Drive a single in-process mlir-opt invocation: parse the input, run the
+// pass pipeline parsed from `argsCStr`, print the resulting Module honouring
+// the user's `--mlir-print-debuginfo` preference, and return JSON containing
+// the output text plus highlight spans for it.
+//
+// Cross-pane linking is sourced from the in-memory Module's per-op
+// Locations — which were attached at input-parse time and carried through
+// the pass pipeline — so it keeps working even when the displayed text has
+// no `loc(...)` annotations. The output text is reparsed once (with
+// AsmParserState) to obtain source ranges; ops are mapped to the captured
+// locations by walking the pre-print and post-reparse IRs in parallel.
+extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
   if (!input) input = "";
+  if (!argsCStr) argsCStr = "";
 
   MLIRContext &ctx = getHighlightContext();
 
-  // ---- Parse #1: original (with debug info), to capture locations.
-  auto buffer1 = llvm::MemoryBuffer::getMemBufferCopy(input, "withdbg.mlir");
-  llvm::SourceMgr sourceMgr1;
-  sourceMgr1.AddNewSourceBuffer(std::move(buffer1), llvm::SMLoc());
+  // ---- Args parsing.
+  bool printDebugInfo = false;
+  std::vector<std::string> tokens;
+  tokenizeArgs(argsCStr, tokens);
+
+  llvm::SmallVector<std::string, 4> passSpecs;
+  std::string explicitPipeline;
+  for (const auto &tok : tokens) {
+    llvm::StringRef t(tok);
+    if (t == "--mlir-print-debuginfo" || t == "-mlir-print-debuginfo") {
+      printDebugInfo = true;
+      continue;
+    }
+    llvm::StringRef stripped = stripDashes(t);
+    if (stripped.consume_front("pass-pipeline=")) {
+      explicitPipeline = stripped.str();
+      continue;
+    }
+    if (stripped.empty()) continue;
+    passSpecs.emplace_back(stripped.str());
+  }
+
+  std::string pipelineStr = explicitPipeline;
+  if (pipelineStr.empty()) {
+    for (size_t i = 0; i < passSpecs.size(); ++i) {
+      if (i) pipelineStr += ',';
+      pipelineStr += passSpecs[i];
+    }
+  }
 
   std::string errBuf;
   llvm::raw_string_ostream errStream(errBuf);
-  SourceMgrDiagnosticHandler diagHandler(sourceMgr1, &ctx, errStream);
 
-  Block block1;
-  ParserConfig config(&ctx, /*verifyAfterParse=*/false);
-  LogicalResult parseResult1 = parseAsmSourceFile(sourceMgr1, &block1, config);
+  auto makeError = [&](llvm::StringRef msg) -> char * {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << "{\"ok\":false,\"err\":";
+    std::string combined;
+    if (!msg.empty()) combined = msg.str();
+    if (!errBuf.empty()) {
+      if (!combined.empty()) combined += '\n';
+      combined += errBuf;
+    }
+    emitJsonString(os, combined);
+    os << "}";
+    os.flush();
+    return toHeapString(out);
+  };
+
+  // ---- Parse input as a ModuleOp (implicit module wrapping kicks in if the
+  // input is bare top-level ops).
+  auto inputBuf = llvm::MemoryBuffer::getMemBufferCopy(input, "input.mlir");
+  llvm::SourceMgr srcMgr;
+  srcMgr.AddNewSourceBuffer(std::move(inputBuf), llvm::SMLoc());
+  SourceMgrDiagnosticHandler diagHandler(srcMgr, &ctx, errStream);
+
+  ParserConfig parserConfig(&ctx, /*verifyAfterParse=*/true);
+  OwningOpRef<ModuleOp> module =
+      parseSourceFile<ModuleOp>(srcMgr, parserConfig);
   errStream.flush();
+  if (!module)
+    return makeError("parse failed");
+
+  // ---- Build and run the pass pipeline.
+  if (!pipelineStr.empty()) {
+    PassManager pm(&ctx);
+    if (failed(parsePassPipeline(pipelineStr, pm, errStream))) {
+      errStream.flush();
+      return makeError("pass pipeline parse failed");
+    }
+    if (failed(pm.run(*module))) {
+      errStream.flush();
+      return makeError("pass pipeline failed");
+    }
+  }
+  errStream.flush();
+
+  // ---- Capture per-op locations from the in-memory module in walk order.
+  llvm::SmallVector<Location, 32> opLocs;
+  module->walk([&](Operation *op) { opLocs.push_back(op->getLoc()); });
+
+  // ---- Print module with the user's debug-info preference.
+  std::string outputText;
+  {
+    llvm::raw_string_ostream os(outputText);
+    OpPrintingFlags flags;
+    if (printDebugInfo) flags.enableDebugInfo();
+    module->print(os, flags);
+    os << '\n';
+  }
+
+  // ---- Reparse output with AsmParserState to get source ranges.
+  auto outBuf =
+      llvm::MemoryBuffer::getMemBufferCopy(outputText, "output.mlir");
+  const char *bufStart = outBuf->getBufferStart();
+  size_t bufLen = outBuf->getBufferSize();
+  llvm::SourceMgr outSrcMgr;
+  outSrcMgr.AddNewSourceBuffer(std::move(outBuf), llvm::SMLoc());
+
+  std::string errBuf2;
+  llvm::raw_string_ostream errStream2(errBuf2);
+  SourceMgrDiagnosticHandler diagHandler2(outSrcMgr, &ctx, errStream2);
+
+  Block outBlock;
+  AsmParserState state;
+  ParserConfig outParserConfig(&ctx, /*verifyAfterParse=*/false);
+  LogicalResult outParse =
+      parseAsmSourceFile(outSrcMgr, &outBlock, outParserConfig, &state);
+  errStream2.flush();
 
   std::string out;
   llvm::raw_string_ostream os(out);
 
-  if (failed(parseResult1)) {
-    os << "{\"ok\":false,\"err\":";
-    emitJsonString(os, errBuf);
-    os << "}";
-    os.flush();
-    return toHeapString(out);
-  }
-
-  // Capture per-op locations in walk order.
-  llvm::SmallVector<Location, 32> opLocs;
-  for (Operation &top : block1)
-    top.walk([&](Operation *op) { opLocs.push_back(op->getLoc()); });
-
-  // ---- Re-print without debug info.
-  std::string cleanText;
-  {
-    llvm::raw_string_ostream cs(cleanText);
-    OpPrintingFlags flags;
-    flags.enableDebugInfo(false);
-    for (Operation &top : block1) {
-      top.print(cs, flags);
-      cs << '\n';
-    }
-  }
-
-  // ---- Parse #2: clean text, with AsmParserState attached for spans.
-  auto buffer2 =
-      llvm::MemoryBuffer::getMemBufferCopy(cleanText, "clean.mlir");
-  const char *bufStart = buffer2->getBufferStart();
-  size_t bufLen = buffer2->getBufferSize();
-
-  llvm::SourceMgr sourceMgr2;
-  sourceMgr2.AddNewSourceBuffer(std::move(buffer2), llvm::SMLoc());
-
-  // Diagnostics from the second parse should be unreachable (we just printed
-  // valid IR), but capture them defensively.
-  std::string errBuf2;
-  llvm::raw_string_ostream errStream2(errBuf2);
-  SourceMgrDiagnosticHandler diagHandler2(sourceMgr2, &ctx, errStream2);
-
-  Block block2;
-  AsmParserState state2;
-  LogicalResult parseResult2 =
-      parseAsmSourceFile(sourceMgr2, &block2, config, &state2);
-  errStream2.flush();
-
-  if (failed(parseResult2)) {
-    // Fall back: hand the user the (now-clean) text and an empty span list.
+  if (failed(outParse)) {
+    // Shouldn't happen — we just printed valid IR — but degrade gracefully.
     os << "{\"ok\":true,\"text\":";
-    emitJsonString(os, cleanText);
+    emitJsonString(os, outputText);
     os << ",\"spans\":[]";
     if (!errBuf2.empty()) {
       os << ",\"warn\":";
@@ -332,15 +424,13 @@ extern "C" char *mlir_highlight_clean(const char *input) {
     return toHeapString(out);
   }
 
-  // Build Operation* → captured-Location map by walking block2 in the same
-  // order we walked block1. Both walks visit ops deterministically and the
-  // structure is identical (round-trip through print/parse), so indices line
-  // up. If they ever don't, we fall through to op->getLoc() which is
-  // UnknownLoc for clean parses — harmless, just no linking for those ops.
+  // Map reparsed ops back to the captured locations by parallel walk order.
+  // Both walks are deterministic over identical IR structure (the second
+  // came from printing the first), so indices line up.
   llvm::DenseMap<Operation *, Location> locMap;
   {
     size_t idx = 0;
-    for (Operation &top : block2) {
+    for (Operation &top : outBlock) {
       top.walk([&](Operation *op) {
         if (idx < opLocs.size())
           locMap.try_emplace(op, opLocs[idx]);
@@ -350,13 +440,18 @@ extern "C" char *mlir_highlight_clean(const char *input) {
   }
 
   os << "{\"ok\":true,\"text\":";
-  emitJsonString(os, cleanText);
+  emitJsonString(os, outputText);
   os << ",\"spans\":[";
-  emitSpans(os, state2, bufStart, bufLen, [&](Operation *op) -> Location {
+  emitSpans(os, state, bufStart, bufLen, [&](Operation *op) -> Location {
     auto it = locMap.find(op);
     return it == locMap.end() ? Location(op->getLoc()) : it->second;
   });
-  os << "]}";
+  os << "]";
+  if (!errBuf2.empty()) {
+    os << ",\"warn\":";
+    emitJsonString(os, errBuf2);
+  }
+  os << "}";
   os.flush();
   return toHeapString(out);
 }
