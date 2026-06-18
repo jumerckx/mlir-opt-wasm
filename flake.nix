@@ -6,7 +6,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     llvm-project = {
-      url = "github:llvm/llvm-project?ref=llvmorg-21.1.0";
+      url = "github:jumerckx/llvm-project?ref=jm/pdl_constr_cpp";
       flake = false;
     };
   };
