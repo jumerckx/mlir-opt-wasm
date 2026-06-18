@@ -20,10 +20,13 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "mlir/Support/Timing.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -55,6 +58,36 @@ MLIRContext &getHighlightContext() {
     return c;
   }();
   return *ctx;
+}
+
+// Process-wide command-line option registry for the runner, constructed once.
+// Real mlir-opt does not enumerate printing/timing flags itself: it registers
+// them as llvm::cl::opt globals (registerAsmPrinterCLOptions et al.) and reads
+// them back via a default-constructed OpPrintingFlags() and
+// applyPassManagerCLOptions(). We mirror that here so the playground tracks
+// mlir-opt's full flag surface (--mlir-print-op-generic, --mlir-timing,
+// --mlir-print-local-scope, --mlir-elide-elementsattrs-if-larger, …) for free.
+//
+// cl::opt objects register into a global table keyed by name, so re-creating
+// any of them asserts — hence a single lazily-constructed instance. The
+// PassPipelineCLParser must be built after registerAllPasses() (done by
+// getHighlightContext) so it sees every pass as a `--passname` flag.
+struct RunnerCLOptions {
+  // Parses the pass pipeline: positional `--pass-pipeline=...` plus an
+  // individual `--passname` flag per registered pass (e.g. --canonicalize).
+  PassPipelineCLParser passPipeline{"", "Compiler passes to run"};
+
+  RunnerCLOptions() {
+    registerAsmPrinterCLOptions();
+    registerMLIRContextCLOptions();
+    registerPassManagerCLOptions();
+    registerDefaultTimingManagerCLOptions();
+  }
+};
+
+RunnerCLOptions &getRunnerCLOptions() {
+  static RunnerCLOptions *opts = new RunnerCLOptions();
+  return *opts;
 }
 
 void emitJsonString(llvm::raw_ostream &os, llvm::StringRef s) {
@@ -273,17 +306,12 @@ static void tokenizeArgs(llvm::StringRef args,
   }
 }
 
-// Strip leading "--" or "-" from a flag.
-static llvm::StringRef stripDashes(llvm::StringRef s) {
-  if (s.starts_with("--")) return s.drop_front(2);
-  if (s.starts_with("-")) return s.drop_front(1);
-  return s;
-}
-
-// Drive a single in-process mlir-opt invocation: parse the input, run the
-// pass pipeline parsed from `argsCStr`, print the resulting Module honouring
-// the user's `--mlir-print-debuginfo` preference, and return JSON containing
-// the output text plus highlight spans for it.
+// Drive a single in-process mlir-opt invocation: parse `argsCStr` through the
+// same llvm::cl machinery mlir-opt uses, parse the input, run the pass
+// pipeline, print the resulting Module honouring the parsed printing flags
+// (--mlir-print-op-generic, --mlir-print-debuginfo, --mlir-print-local-scope,
+// …), and return JSON containing the output text plus highlight spans for it.
+// --mlir-timing emits its report to stderr, which the page shows in its log.
 //
 // Cross-pane linking is sourced from the in-memory Module's per-op
 // Locations — which were attached at input-parse time and carried through
@@ -295,37 +323,8 @@ extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
   if (!input) input = "";
   if (!argsCStr) argsCStr = "";
 
-  MLIRContext &ctx = getHighlightContext();
-
-  // ---- Args parsing.
-  bool printDebugInfo = false;
-  std::vector<std::string> tokens;
-  tokenizeArgs(argsCStr, tokens);
-
-  llvm::SmallVector<std::string, 4> passSpecs;
-  std::string explicitPipeline;
-  for (const auto &tok : tokens) {
-    llvm::StringRef t(tok);
-    if (t == "--mlir-print-debuginfo" || t == "-mlir-print-debuginfo") {
-      printDebugInfo = true;
-      continue;
-    }
-    llvm::StringRef stripped = stripDashes(t);
-    if (stripped.consume_front("pass-pipeline=")) {
-      explicitPipeline = stripped.str();
-      continue;
-    }
-    if (stripped.empty()) continue;
-    passSpecs.emplace_back(stripped.str());
-  }
-
-  std::string pipelineStr = explicitPipeline;
-  if (pipelineStr.empty()) {
-    for (size_t i = 0; i < passSpecs.size(); ++i) {
-      if (i) pipelineStr += ',';
-      pipelineStr += passSpecs[i];
-    }
-  }
+  MLIRContext &ctx = getHighlightContext(); // also registers all passes
+  RunnerCLOptions &clOpts = getRunnerCLOptions();
 
   std::string errBuf;
   llvm::raw_string_ostream errStream(errBuf);
@@ -346,6 +345,30 @@ extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
     return toHeapString(out);
   };
 
+  // ---- Parse the argument string through LLVM's command-line machinery,
+  // exactly as mlir-opt does at startup. This populates the registered
+  // asm-printer / pass-manager / timing cl::opt globals, which the default
+  // OpPrintingFlags(), applyPassManagerCLOptions() and the timing manager
+  // read back below. The options are process-global and persist across calls,
+  // so reset their occurrences before re-parsing.
+  std::vector<std::string> tokens;
+  tokenizeArgs(argsCStr, tokens);
+  std::vector<const char *> argv;
+  argv.reserve(tokens.size() + 1);
+  argv.push_back("mlir-opt");
+  for (const auto &t : tokens)
+    argv.push_back(t.c_str());
+
+  llvm::cl::ResetAllOptionOccurrences();
+  std::string clErr;
+  llvm::raw_string_ostream clErrStream(clErr);
+  if (!llvm::cl::ParseCommandLineOptions(static_cast<int>(argv.size()),
+                                         argv.data(), /*Overview=*/"",
+                                         &clErrStream)) {
+    clErrStream.flush();
+    return makeError(clErr);
+  }
+
   // ---- Parse input as a ModuleOp (implicit module wrapping kicks in if the
   // input is bare top-level ops).
   auto inputBuf = llvm::MemoryBuffer::getMemBufferCopy(input, "input.mlir");
@@ -360,10 +383,25 @@ extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
   if (!module)
     return makeError("parse failed");
 
-  // ---- Build and run the pass pipeline.
-  if (!pipelineStr.empty()) {
+  // ---- Timing manager (drives --mlir-timing). Its report is emitted to
+  // stderr when `tm` is destroyed at function exit; the page routes stderr
+  // into its log pane. When --mlir-timing is absent the manager is disabled
+  // and prints nothing.
+  DefaultTimingManager tm;
+  applyDefaultTimingManagerCLOptions(tm);
+  TimingScope timing = tm.getRootScope();
+
+  // ---- Build and run the pass pipeline parsed from the cl options.
+  {
     PassManager pm(&ctx);
-    if (failed(parsePassPipeline(pipelineStr, pm, errStream))) {
+    if (failed(applyPassManagerCLOptions(pm)))
+      return makeError("failed to apply pass-manager options");
+    pm.enableTiming(timing);
+    if (failed(clOpts.passPipeline.addToPipeline(
+            pm, [&](const llvm::Twine &msg) {
+              errStream << msg << '\n';
+              return failure();
+            }))) {
       errStream.flush();
       return makeError("pass pipeline parse failed");
     }
@@ -378,13 +416,12 @@ extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
   llvm::SmallVector<Location, 32> opLocs;
   module->walk([&](Operation *op) { opLocs.push_back(op->getLoc()); });
 
-  // ---- Print module with the user's debug-info preference.
+  // ---- Print module honouring the parsed printing flags. A default
+  // OpPrintingFlags() reads them from the cl options parsed above.
   std::string outputText;
   {
     llvm::raw_string_ostream os(outputText);
-    OpPrintingFlags flags;
-    if (printDebugInfo) flags.enableDebugInfo();
-    module->print(os, flags);
+    module->print(os, OpPrintingFlags());
     os << '\n';
   }
 
