@@ -27,6 +27,28 @@
       line-height: 1.4;
     }
 
+    /* CodeMirror's default theme bakes light colours into the gutter, so it
+       ignores the page's light/dark `color-scheme`. Re-state them with the
+       same theme-agnostic greys used elsewhere so the gutter tracks the
+       system theme like the rest of the UI. */
+    .editor .cm-gutters {
+      background-color: rgba(127,127,127,0.07);
+      color: rgba(127,127,127,0.9);
+      border-right-color: rgba(127,127,127,0.4);
+    }
+
+    /* CodeMirror's default cursor (black) and selection background (a light
+       lavender) are tuned for a light background and stay too faint on dark.
+       Re-state them here, with brighter dark-mode variants below. The
+       specificity (.editor + .cm-editor.cm-focused) beats the base theme. */
+    .editor .cm-cursor,
+    .editor .cm-dropCursor { border-left-color: #222; }
+    .editor .cm-selectionBackground,
+    .editor .cm-editor.cm-focused .cm-selectionBackground {
+      background: #b6cdf2;
+    }
+    .editor .cm-content ::selection { background: #b6cdf2; }
+
     /* Token styles applied by Decoration.mark. Operations are bold; SSA-value
        colours come from inline `style="color: hsl(...)"` set per-decoration so
        they stay distinct without a fixed palette. */
@@ -36,6 +58,35 @@
     .tk-attr-alias-def, .tk-attr-alias-use { color: #7a4fb8; }
     .tk-type-alias-def, .tk-type-alias-use { color: #2a72c5; }
     .vhl { background: rgba(255, 215, 0, 0.25); border-radius: 2px; }
+
+    /* Per-SSA-value colours. JS sets `--val-hue` inline (see app.js); the
+       lightness lives here so it can flip with the system theme — an inline
+       `color: hsl(...)` couldn't be overridden by the dark media query. */
+    .tk-val-def[style*="--val-hue"],
+    .tk-val-use[style*="--val-hue"] {
+      color: hsl(var(--val-hue), 65%, 45%);
+    }
+
+    /* The token palette above is tuned for a light background; brighten it on
+       dark so the highlighting keeps its contrast like the rest of the UI. */
+    @media (prefers-color-scheme: dark) {
+      .editor .cm-cursor,
+      .editor .cm-dropCursor { border-left-color: #ddd; }
+      .editor .cm-selectionBackground,
+      .editor .cm-editor.cm-focused .cm-selectionBackground {
+        background: #2f4a73;
+      }
+      .editor .cm-content ::selection { background: #2f4a73; }
+
+      .tk-blk-def, .tk-blk-use { color: #e8975a; }
+      .tk-sym-use { color: #4ecdb8; }
+      .tk-attr-alias-def, .tk-attr-alias-use { color: #b794e6; }
+      .tk-type-alias-def, .tk-type-alias-use { color: #5fa3ec; }
+      .tk-val-def[style*="--val-hue"],
+      .tk-val-use[style*="--val-hue"] {
+        color: hsl(var(--val-hue), 70%, 68%);
+      }
+    }
 
     .err {
       font-family: ui-monospace, monospace;

@@ -12,8 +12,6 @@ import {
   Decoration,
   keymap,
   lineNumbers,
-  highlightActiveLine,
-  highlightActiveLineGutter,
   highlightSpecialChars,
   drawSelection,
   dropCursor,
@@ -32,9 +30,11 @@ import {
 // A compact "basic setup" assembled from the four sub-packages we already
 // pull in. Avoids the `codemirror` umbrella, which would drag autocomplete /
 // search / lint in and make the dep graph harder to dedupe.
+// Note: CodeMirror's active-line highlight (highlightActiveLine /
+// highlightActiveLineGutter) is intentionally omitted — we don't want the
+// current line emphasised.
 const basicSetup = [
   lineNumbers(),
-  highlightActiveLineGutter(),
   highlightSpecialChars(),
   history(),
   foldGutter(),
@@ -44,7 +44,6 @@ const basicSetup = [
   bracketMatching(),
   rectangularSelection(),
   crosshairCursor(),
-  highlightActiveLine(),
   keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
 ];
 
@@ -157,7 +156,9 @@ function buildDecorations(text, parsed, activated) {
       activated.has(String(d.i))
     ) {
       const hue = (d.i * 137.508) % 360;
-      attrs.style = `color: hsl(${hue.toFixed(0)}, 65%, 48%)`;
+      // The lightness lives in CSS so the colour can adapt to the system
+      // theme; here we only hand over the hue.
+      attrs.style = `--val-hue: ${hue.toFixed(0)}`;
     }
     builder.add(
       d.s,
