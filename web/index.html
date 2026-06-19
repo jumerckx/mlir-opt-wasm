@@ -3,18 +3,8 @@
 <head>
   <meta charset="utf-8">
   <title>mlir-opt web</title>
+  <link rel="stylesheet" href="./styles.css">
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 80rem; }
-    h1 {
-      margin: 0 0 0.75rem;
-      font-size: 1.9rem;
-      font-weight: 600;
-      letter-spacing: -0.015em;
-      font-family: "Iowan Old Style", "Palatino Linotype", Palatino,
-                   "Book Antiqua", Georgia, serif;
-    }
-    h2 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; }
     .controls { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
     .controls input { flex: 1; font-family: ui-monospace, monospace; padding: 0.3rem; }
     /* Looks like the start of a shell command so the args field reads as its
@@ -31,122 +21,6 @@
        keeps the panes a fixed width and lets the editor scroll horizontally. */
     .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
 
-    /* CodeMirror host. Just provides a border + fixed height; the editor
-       itself owns the inside. */
-    .editor {
-      border: 1px solid rgba(127,127,127,0.4);
-      border-radius: 3px;
-      overflow: hidden;
-    }
-    .editor .cm-editor { height: 22rem; }
-    .editor .cm-editor.cm-focused { outline: none; }
-    .editor .cm-scroller {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.78rem;
-      line-height: 1.4;
-      overflow-x: auto;
-    }
-    /* Don't wrap long lines — overflow scrolls horizontally instead. app.js
-       omits the `lineWrapping` extension, but state it here too so wrapping
-       can't creep back in. */
-    .editor .cm-content { white-space: pre; }
-    .editor .cm-line { overflow-wrap: normal; word-break: normal; }
-
-    /* CodeMirror's default theme bakes light colours into the gutter, so it
-       ignores the page's light/dark `color-scheme`. Re-state them with the
-       same theme-agnostic greys used elsewhere so the gutter tracks the
-       system theme like the rest of the UI.
-
-       The gutter is `position: sticky`, so it stays put while the code scrolls
-       horizontally — but its background must be OPAQUE or the scrolling code
-       shows through it. `Canvas` is the system page-background colour (adapts
-       to light/dark via `color-scheme`); layering the grey tint over it keeps
-       the subtle shading while hiding the code behind the gutter. */
-    .editor .cm-gutters {
-      background-color: Canvas;
-      background-image: linear-gradient(rgba(127,127,127,0.07), rgba(127,127,127,0.07));
-      color: rgba(127,127,127,0.9);
-      border-right-color: rgba(127,127,127,0.4);
-    }
-
-    /* The current line is intentionally not emphasised. app.js omits the
-       `highlightActiveLine`/`highlightActiveLineGutter` extensions, but the
-       base theme still tints the cursor's line/gutter, so neutralise the
-       `.cm-activeLine` / `.cm-activeLineGutter` backgrounds explicitly. */
-    .editor .cm-activeLine,
-    .editor .cm-activeLineGutter { background-color: transparent; }
-
-    /* CodeMirror's default cursor (black) and selection background (a light
-       lavender) are tuned for a light background and stay too faint on dark.
-       Re-state them here, with brighter dark-mode variants below. CodeMirror's
-       own focused-selection rule is `.cm-editor.cm-focused .cm-selectionLayer
-       .cm-selectionBackground` — we must match through `.cm-selectionLayer`
-       too, or our override loses on specificity and the light-mode lavender
-       leaks into dark mode. */
-    .editor .cm-cursor,
-    .editor .cm-dropCursor { border-left-color: #222; }
-    .editor .cm-selectionLayer .cm-selectionBackground,
-    .editor .cm-editor.cm-focused .cm-selectionLayer .cm-selectionBackground {
-      background: #b6cdf2;
-    }
-    .editor .cm-content ::selection { background: #b6cdf2; }
-
-    /* Token styles applied by Decoration.mark. Operations are bold; SSA-value
-       colours come from inline `style="color: hsl(...)"` set per-decoration so
-       they stay distinct without a fixed palette. */
-    .tk-op { font-weight: 600; }
-    .tk-comment { color: #8a8a8a; font-style: italic; }
-    .tk-blk-def, .tk-blk-use { color: #c5762a; font-style: italic; }
-    .tk-sym-use { color: #2a9d8f; }
-    .tk-attr-alias-def, .tk-attr-alias-use { color: #7a4fb8; }
-    .tk-type-alias-def, .tk-type-alias-use { color: #2a72c5; }
-    .vhl { background: rgba(255, 215, 0, 0.25); border-radius: 2px; }
-
-    /* Per-SSA-value colours. JS sets `--val-hue` inline (see app.js); the
-       lightness lives here so it can flip with the system theme — an inline
-       `color: hsl(...)` couldn't be overridden by the dark media query. */
-    .tk-val-def[style*="--val-hue"],
-    .tk-val-use[style*="--val-hue"] {
-      color: hsl(var(--val-hue), 65%, 45%);
-    }
-
-    /* The token palette above is tuned for a light background; brighten it on
-       dark so the highlighting keeps its contrast like the rest of the UI. */
-    @media (prefers-color-scheme: dark) {
-      .editor .cm-cursor,
-      .editor .cm-dropCursor { border-left-color: #ddd; }
-      .editor .cm-selectionLayer .cm-selectionBackground,
-      .editor .cm-editor.cm-focused .cm-selectionLayer .cm-selectionBackground {
-        background: #2f4a73;
-      }
-      .editor .cm-content ::selection { background: #2f4a73; }
-
-      .tk-comment { color: #7e7e7e; }
-      .tk-blk-def, .tk-blk-use { color: #e8975a; }
-      .tk-sym-use { color: #4ecdb8; }
-      .tk-attr-alias-def, .tk-attr-alias-use { color: #b794e6; }
-      .tk-type-alias-def, .tk-type-alias-use { color: #5fa3ec; }
-      .tk-val-def[style*="--val-hue"],
-      .tk-val-use[style*="--val-hue"] {
-        color: hsl(var(--val-hue), 70%, 68%);
-      }
-    }
-
-    .err {
-      font-family: ui-monospace, monospace;
-      font-size: 0.8rem;
-      color: #c0392b;
-      background: rgba(192, 57, 43, 0.08);
-      padding: 0.4rem 0.6rem;
-      margin: 0.25rem 0 0;
-      border-radius: 3px;
-      white-space: pre-wrap;
-      max-height: 8rem;
-      overflow: auto;
-      display: none;
-    }
-    .err.shown { display: block; }
-
     pre#log {
       background: rgba(127,127,127,0.1);
       padding: 0.5rem;
@@ -156,8 +30,6 @@
       font-family: ui-monospace, monospace;
       white-space: pre-wrap;
     }
-    #status { font-style: italic; opacity: 0.7; margin: 0.25rem 0; }
-    button { padding: 0.35rem 1rem; }
   </style>
 
   <!-- CodeMirror is bundled into ./codemirror.js by the Nix `codemirror-bundle`
@@ -166,6 +38,10 @@
 </head>
 <body>
   <h1>mlir-opt web</h1>
+  <nav class="pages">
+    <a href="./index.html" aria-current="page">mlir-opt</a> ·
+    <a href="./pdl.html">PDL → pdl_interp lowering</a>
+  </nav>
   <p id="status">Loading mlir-opt.wasm…</p>
   <div class="controls">
     <span class="cmd-prefix">mlir-opt</span>
