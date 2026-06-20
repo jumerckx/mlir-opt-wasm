@@ -196,7 +196,11 @@
         site = pkgs.runCommand "mlir-opt-wasm-site" { } ''
           mkdir -p $out
           cp ${./web/index.html}              $out/index.html
+          cp ${./web/pdl.html}                $out/pdl.html
+          cp ${./web/styles.css}              $out/styles.css
           cp ${./web/app.js}                  $out/app.js
+          cp ${./web/pdl.js}                  $out/pdl.js
+          cp ${./web/editor.js}               $out/editor.js
           cp ${codemirror-bundle}/codemirror.js $out/codemirror.js
           cp ${mlir-opt-wasm}/mlir-opt.mjs    $out/mlir-opt.mjs
           cp ${mlir-opt-wasm}/mlir-opt.wasm   $out/mlir-opt.wasm
