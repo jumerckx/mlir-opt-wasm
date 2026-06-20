@@ -191,8 +191,8 @@
         # --- Stage 4 ----------------------------------------------------------
         # Assemble the static site: HTML + JS from ./web/ plus the wasm
         # artifacts and the CodeMirror bundle, all at the root of $out. This is
-        # what gets uploaded to GitHub Pages, and what you serve locally via
-        # `python3 web/serve.py result/`.
+        # what gets uploaded to GitHub Pages, and what you serve locally by
+        # pointing any static file server at the built `result/` directory.
         site = pkgs.runCommand "mlir-opt-wasm-site" { } ''
           mkdir -p $out
           cp ${./web/index.html}              $out/index.html
@@ -204,7 +204,18 @@
           cp ${codemirror-bundle}/codemirror.js $out/codemirror.js
           cp ${mlir-opt-wasm}/mlir-opt.mjs    $out/mlir-opt.mjs
           cp ${mlir-opt-wasm}/mlir-opt.wasm   $out/mlir-opt.wasm
+          cp ${./web/sw.js}                   $out/sw.js
           chmod -R u+w $out
+
+          # Stamp the service worker with a content hash of every asset. Any
+          # rebuild that changes an asset changes this hash, hence sw.js itself,
+          # which is how the browser learns to install a fresh cache and purge
+          # the old one (see web/sw.js). Replaces the old Date.now() cache-bust.
+          ver=$(cat $out/index.html $out/pdl.html $out/styles.css \
+                    $out/app.js $out/pdl.js $out/editor.js \
+                    $out/codemirror.js $out/mlir-opt.mjs $out/mlir-opt.wasm \
+                | sha256sum | cut -c1-16)
+          substituteInPlace $out/sw.js --replace-fail __BUILD_VERSION__ "$ver"
         '';
 
         devShell = pkgs.mkShell {

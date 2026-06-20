@@ -6,6 +6,17 @@
 // Everything page-specific (which editors exist, the pass pipeline to run, the
 // surrounding DOM) lives in the per-page module that imports from here.
 
+// Register the service worker (./sw.js) so the site caches its assets and works
+// offline. Both pages import this module, so registering here covers them both.
+// `updateViaCache: "none"` keeps the browser from serving a stale sw.js from
+// its HTTP cache, so a new build's SW is always detected. Best-effort: if the
+// browser has no SW support the page still works, just without caching.
+if ("serviceWorker" in navigator) {
+    navigator.serviceWorker
+        .register("./sw.js", { updateViaCache: "none" })
+        .catch(() => {});
+}
+
 // All CodeMirror symbols come from the locally bundled ESM file produced by
 // the `codemirror-bundle` Nix derivation. Single module instance, no CDN.
 import {
@@ -467,14 +478,12 @@ export function makeEditor({ parent, doc, editable, onChange }) {
 export async function loadMlir({ onLog } = {}) {
     const log = onLog || (() => {});
 
-    // Cache-bust the wasm artifacts every page load. Nix store mtimes are all
-    // 1970-01-01 so browsers happily serve stale mjs/wasm from disk cache
-    // across rebuilds, which would silently keep an older `_mlir_*` export
-    // surface alive. A query-string suffix forces a fresh fetch.
-    const cacheBust = `?v=${Date.now()}`;
-
-    const { default: MlirOpt } = await import("./mlir-opt.mjs" + cacheBust);
-    const res = await fetch("./mlir-opt.wasm" + cacheBust);
+    // Stable URLs (no cache-busting query string): the service worker caches
+    // these by URL and serves them offline, and staleness across rebuilds is
+    // handled by the SW's content-hashed cache version (see ./sw.js), so the
+    // browser can safely reuse the multi-MB wasm instead of refetching it.
+    const { default: MlirOpt } = await import("./mlir-opt.mjs");
+    const res = await fetch("./mlir-opt.wasm");
     if (!res.ok) throw new Error(`fetch mlir-opt.wasm: HTTP ${res.status}`);
     const wasmBytes = await res.arrayBuffer();
     const wasmModule = await WebAssembly.compile(wasmBytes);
