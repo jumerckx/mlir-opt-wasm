@@ -76,8 +76,45 @@ for (const st of STAGES) {
         editable: false,
     });
     st.errEl = $(`${st.id}-err`);
+    st.el = $(`${st.id}-out`).closest(".stage");
 }
 const stage = Object.fromEntries(STAGES.map((s) => [s.id, s]));
+
+// ---------------------------------------------------------------------------
+// Folding the two intermediate match stages. When both are collapsed the lane
+// is short enough to compare its pdl_interp result directly against the direct
+// lane's, so we align the two result panes top-to-top.
+
+const flowsEl = document.querySelector(".flows");
+
+// Push the higher result pane down so both pdl_interp results start at the same
+// y — but only when both intermediate match stages are folded; otherwise leave
+// the natural (taller) layout alone.
+function syncResultAlignment() {
+    stage.direct.el.style.marginTop = "";
+    stage.match3.el.style.marginTop = "";
+    const bothFolded =
+        stage.match1.el.classList.contains("folded") &&
+        stage.match2.el.classList.contains("folded");
+    if (!bothFolded) return;
+    const flowsTop = flowsEl.getBoundingClientRect().top;
+    const dTop = stage.direct.el.getBoundingClientRect().top - flowsTop;
+    const mTop = stage.match3.el.getBoundingClientRect().top - flowsTop;
+    const diff = Math.round(mTop - dTop);
+    if (diff > 0) stage.direct.el.style.marginTop = `${diff}px`;
+    else if (diff < 0) stage.match3.el.style.marginTop = `${-diff}px`;
+}
+
+for (const id of ["match1", "match2"]) {
+    const h3 = stage[id].el.querySelector("h3");
+    h3.addEventListener("click", () => {
+        stage[id].el.classList.toggle("folded");
+        syncResultAlignment();
+    });
+}
+
+// Editor heights change on re-run and on resize; keep the alignment in step.
+window.addEventListener("resize", syncResultAlignment);
 
 let mlirOptRun = () => null;
 
@@ -122,6 +159,7 @@ function run() {
         setStage(stage.match3, mlirOptRun(m2, "--convert-match-to-pdl-interp"));
     } finally {
         runEl.disabled = false;
+        syncResultAlignment();
     }
 }
 

@@ -13,7 +13,7 @@
        length) and scroll internally past a cap, rather than the fixed
        height the two-pane demo uses. */
     .editor .cm-editor { height: auto; min-height: 2.6rem; }
-    .editor .cm-scroller { max-height: 24rem; overflow-y: auto; }
+    .editor .cm-scroller { max-height: 48rem; overflow-y: auto; }
 
     .input-wrap { max-width: 60rem; margin: 0 auto; }
     h3 { font-size: 0.82rem; margin: 0 0 0.25rem; font-weight: 600; }
@@ -21,18 +21,27 @@
     /* Fork connector: a stem down from the input, a horizontal bar, and two
        legs descending into the two lanes (whose centres sit near 25%/75%).
        Purely decorative — the lane headers and pass pills carry the meaning. */
-    .fork { --line: rgba(127,127,127,0.6); position: relative; height: 2.4rem; margin: 0.25rem 0 0; }
-    .fork i { position: absolute; }
-    .fork .stem { left: 50%; top: 0; height: 1.2rem; border-left: 2px solid var(--line); }
-    .fork .bar { top: 1.2rem; left: 25%; right: 25%; border-top: 2px solid var(--line); }
-    .fork .leg { top: 1.2rem; height: 1.2rem; border-left: 2px solid var(--line); }
+    .fork { --line: rgba(127,127,127,0.6); position: relative; height: 2.4rem; margin: 0.25rem 0 0.6rem; }
+    /* Lines are centred 2px boxes (left + translateX(-50%)) so the arrowheads,
+       which use the same idiom, sit dead-centre on them. */
+    .fork i { position: absolute; transform: translateX(-50%); background: var(--line); }
+    .fork .stem { left: 50%; top: 0; width: 2px; height: 1.2rem; }
+    /* Legs stop short of the fork's bottom edge so their arrowheads (drawn
+       below the leg via top:100%) point into the gap above the lane boxes
+       rather than overlapping them. */
+    .fork .leg { top: 1.2rem; width: 2px; height: 0.8rem; }
     .fork .leg.l { left: 25%; }
-    .fork .leg.r { right: 25%; }
+    .fork .leg.r { left: 75%; }
+    /* The bar is horizontal, so it opts out of the vertical-line treatment. */
+    .fork .bar { top: 1.2rem; left: 25%; right: 25%; width: auto; height: 2px;
+                 transform: none; }
+    /* Arrowhead sits just below the leg (top:100%) so the line never shows
+       through it. */
     .fork .leg::after {
-      content: ""; position: absolute; left: 50%; bottom: -1px;
-      transform: translateX(-50%);
-      border-left: 4px solid transparent; border-right: 4px solid transparent;
-      border-top: 6px solid var(--line);
+      content: ""; position: absolute; left: 50%; top: 100%;
+      transform: translateX(-50%); width: 0; height: 0;
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 7px solid var(--line);
     }
 
     /* Two side-by-side lanes. `minmax(0, 1fr)` so wide IR scrolls inside a
@@ -59,15 +68,18 @@
        connecting the stage above to the stage below, capped with an
        arrowhead. */
     .pass { position: relative; text-align: center; padding: 0.75rem 0; }
+    /* Centred 2px connector line. Stops 7px short of the bottom — exactly the
+       arrowhead height — so the opaque head below it shows no tail through it. */
     .pass::before {
-      content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
-      border-left: 2px solid var(--accent); opacity: 0.55; z-index: 0;
+      content: ""; position: absolute; left: 50%; top: 0; bottom: 7px;
+      width: 2px; transform: translateX(-50%);
+      background: var(--accent); opacity: 0.5; z-index: 0;
     }
     .pass::after {
-      content: ""; position: absolute; left: 50%; bottom: -1px;
-      transform: translateX(-50%);
-      border-left: 4px solid transparent; border-right: 4px solid transparent;
-      border-top: 6px solid var(--accent); opacity: 0.7;
+      content: ""; position: absolute; left: 50%; bottom: 0;
+      transform: translateX(-50%); width: 0; height: 0;
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 7px solid var(--accent);
     }
     .pass code {
       position: relative; z-index: 1;
@@ -81,6 +93,22 @@
     }
 
     .stage { position: relative; }
+
+    /* Foldable intermediate stages: clicking the heading collapses the editor
+       to just its title bar. pdl.js then realigns the two pdl_interp results
+       when both intermediate match stages are folded. */
+    .stage.foldable > h3 { cursor: pointer; user-select: none; }
+    .stage.foldable > h3::before {
+      content: "\25be"; /* ▾ */
+      display: inline-block;
+      width: 1em;
+      font-size: 0.85em;
+      opacity: 0.7;
+    }
+    .stage.foldable.folded > h3::before { content: "\25b8"; /* ▸ */ }
+    .stage.foldable.folded > .editor,
+    .stage.foldable.folded > .err { display: none; }
+
     .result-tag {
       display: inline-block;
       font-size: 0.68rem;
@@ -154,13 +182,13 @@
       <div class="lane-head">Lowering via the <code>match</code> dialect</div>
       <div class="lane-sub">matchers are combined before lowering</div>
       <div class="pass"><code>convert-pdl-to-match</code></div>
-      <div class="stage">
+      <div class="stage foldable">
         <h3>match dialect</h3>
         <div class="editor" id="match1-out"></div>
         <pre class="err" id="match1-err"></pre>
       </div>
       <div class="pass"><code>match-combine-matchers</code></div>
-      <div class="stage">
+      <div class="stage foldable">
         <h3>combined matchers</h3>
         <div class="editor" id="match2-out"></div>
         <pre class="err" id="match2-err"></pre>
