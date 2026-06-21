@@ -322,6 +322,59 @@ export function clearEditor(view, errEl) {
 }
 
 // ---------------------------------------------------------------------------
+// Minimal C++ highlighter for the generated-pattern pane on the PDL page. The
+// C++ that `match-to-cpp` emits isn't MLIR, so the wasm highlighter and the
+// op-linker don't apply; instead we tokenise it with one regex pass and reuse
+// the same decoration field. This is deliberately a small lexical pass (not a
+// real C++ grammar) — enough to make the generated code readable without
+// dragging a CodeMirror language package into the vendored bundle.
+
+const CPP_KEYWORDS = new Set([
+    "alignas", "alignof", "auto", "bool", "break", "case", "catch", "char",
+    "class", "const", "constexpr", "continue", "default", "delete", "do",
+    "double", "else", "enum", "explicit", "export", "extern", "false", "float",
+    "for", "friend", "goto", "if", "inline", "int", "long", "mutable",
+    "namespace", "new", "noexcept", "nullptr", "operator", "override",
+    "private", "protected", "public", "register", "return", "short", "signed",
+    "sizeof", "static", "static_cast", "struct", "switch", "template", "this",
+    "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using",
+    "virtual", "void", "volatile", "while",
+]);
+
+// Alternatives are tried left-to-right at each position, so comments / strings
+// / preprocessor lines come first to swallow their contents before the
+// number/identifier rules can see them. `m` lets `^#…` match per-line.
+const CPP_TOKEN =
+    /(?<comment>\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(?<pp>^[ \t]*#[^\n]*)|(?<str>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(?<num>\b\d[\w.]*\b)|(?<ident>[A-Za-z_]\w*)/gm;
+
+function buildCppDecorations(text) {
+    const builder = new RangeSetBuilder();
+    for (const m of text.matchAll(CPP_TOKEN)) {
+        const g = m.groups;
+        let cls;
+        if (g.comment != null) cls = "tk-comment";
+        else if (g.pp != null) cls = "tk-cpp-pp";
+        else if (g.str != null) cls = "tk-cpp-str";
+        else if (g.num != null) cls = "tk-cpp-num";
+        else if (g.ident != null && CPP_KEYWORDS.has(g.ident)) cls = "tk-cpp-kw";
+        else continue; // non-keyword identifier: leave unstyled
+        builder.add(m.index, m.index + m[0].length, Decoration.mark({ class: cls }));
+    }
+    return builder.finish();
+}
+
+// Show C++ text in a view with lexical highlighting. No op-line decorations
+// (those are MLIR-only), so clear that field.
+export function applyCppHighlight(view, text) {
+    view.dispatch({
+        effects: [
+            setHighlights.of(buildCppDecorations(text)),
+            setOpLines.of(Decoration.none),
+        ],
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Cross-pane op linking. Clicking an op in any editor toggles a shared
 // activation keyed by that op's source-location set; every op in every pane
 // that shares at least one key gets a whole-line background in a colour

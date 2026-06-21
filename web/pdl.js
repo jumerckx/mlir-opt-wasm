@@ -13,6 +13,7 @@ import {
     makeEditor,
     applyHighlight,
     applyHighlightOf,
+    applyCppHighlight,
     showError,
     replaceDoc,
     clearEditor,
@@ -142,7 +143,8 @@ function setStage(st, res) {
 }
 
 // Show a translation result (generated C++). Unlike setStage this output is not
-// MLIR, so it's shown as plain text without the MLIR highlighter/op-linking.
+// MLIR, so it gets the lightweight C++ lexer rather than the MLIR
+// highlighter/op-linker.
 function setCppStage(st, res) {
     if (!res || !res.ok) {
         clearEditor(st.view, st.errEl);
@@ -150,6 +152,7 @@ function setCppStage(st, res) {
         return null;
     }
     replaceDoc(st.view, res.text);
+    applyCppHighlight(st.view, res.text);
     showError(st.errEl, null);
     return res.text;
 }

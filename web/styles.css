@@ -101,6 +101,14 @@ nav.pages a[aria-current] { font-weight: 600; color: inherit; }
 .tk-type-alias-def, .tk-type-alias-use { color: #2a72c5; }
 .vhl { background: rgba(255, 215, 0, 0.25); border-radius: 2px; }
 
+/* C++ lexical highlighting for the PDL page's generated-pattern pane (see the
+   tokenizer in editor.js). Reuses .tk-comment for comments; the rest get their
+   own palette entries, brightened for dark mode in the media query below. */
+.tk-cpp-kw { color: #2a72c5; font-weight: 600; }
+.tk-cpp-str { color: #2a9d8f; }
+.tk-cpp-num { color: #c5762a; }
+.tk-cpp-pp { color: #7a4fb8; }
+
 /* Per-SSA-value colours. JS sets `--val-hue` inline (see editor.js); the
    lightness lives here so it can flip with the system theme — an inline
    `color: hsl(...)` couldn't be overridden by the dark media query. */
@@ -129,6 +137,11 @@ nav.pages a[aria-current] { font-weight: 600; color: inherit; }
   .tk-val-use[style*="--val-hue"] {
     color: hsl(var(--val-hue), 70%, 68%);
   }
+
+  .tk-cpp-kw { color: #5fa3ec; }
+  .tk-cpp-str { color: #4ecdb8; }
+  .tk-cpp-num { color: #e8975a; }
+  .tk-cpp-pp { color: #b794e6; }
 }
 
 .err {
