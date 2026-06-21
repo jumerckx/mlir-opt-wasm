@@ -68,6 +68,7 @@ const STAGES = [
     { id: "match1" },
     { id: "match2" },
     { id: "match3" },
+    { id: "cpp" },
 ];
 for (const st of STAGES) {
     st.view = makeEditor({
@@ -86,13 +87,21 @@ const stage = Object.fromEntries(STAGES.map((s) => [s.id, s]));
 // lane's, so we align the two result panes top-to-top.
 
 const flowsEl = document.querySelector(".flows");
+const branchesEl = document.querySelector(".branches");
 
 // Push the higher result pane down so both pdl_interp results start at the same
 // y — but only when both intermediate match stages are folded; otherwise leave
 // the natural (taller) layout alone.
 function syncResultAlignment() {
     stage.direct.el.style.marginTop = "";
-    stage.match3.el.style.marginTop = "";
+    // Shift the whole branches row (pdl_interp + C++ together) so the two
+    // outputs stay aligned with each other while we align against the direct
+    // lane's result.
+    branchesEl.style.marginTop = "";
+    // In the single-column (mobile) layout the lanes already stack vertically,
+    // so there's nothing to line up — the margins above (now cleared) would
+    // only push the direct result down for no reason.
+    if (window.matchMedia("(max-width: 55rem)").matches) return;
     const bothFolded =
         stage.match1.el.classList.contains("folded") &&
         stage.match2.el.classList.contains("folded");
@@ -102,7 +111,7 @@ function syncResultAlignment() {
     const mTop = stage.match3.el.getBoundingClientRect().top - flowsTop;
     const diff = Math.round(mTop - dTop);
     if (diff > 0) stage.direct.el.style.marginTop = `${diff}px`;
-    else if (diff < 0) stage.match3.el.style.marginTop = `${-diff}px`;
+    else if (diff < 0) branchesEl.style.marginTop = `${-diff}px`;
 }
 
 for (const id of ["match1", "match2"]) {
@@ -117,6 +126,7 @@ for (const id of ["match1", "match2"]) {
 window.addEventListener("resize", syncResultAlignment);
 
 let mlirOptRun = () => null;
+let mlirTranslateMatchToCpp = () => null;
 
 // Show a pass result in a stage. Returns the output text on success so the
 // caller can feed it to the next match-flow step, or null on failure.
@@ -128,6 +138,19 @@ function setStage(st, res) {
     }
     replaceDoc(st.view, res.text);
     applyHighlightOf(st.view, st.errEl, res, res.text);
+    return res.text;
+}
+
+// Show a translation result (generated C++). Unlike setStage this output is not
+// MLIR, so it's shown as plain text without the MLIR highlighter/op-linking.
+function setCppStage(st, res) {
+    if (!res || !res.ok) {
+        clearEditor(st.view, st.errEl);
+        showError(st.errEl, res?.err || "translation failed");
+        return null;
+    }
+    replaceDoc(st.view, res.text);
+    showError(st.errEl, null);
     return res.text;
 }
 
@@ -156,7 +179,10 @@ function run() {
             mlirOptRun(m1, "--match-combine-matchers"),
         );
         if (m2 == null) return;
+
+        // The combined matchers fan out to two independent backends.
         setStage(stage.match3, mlirOptRun(m2, "--convert-match-to-pdl-interp"));
+        setCppStage(stage.cpp, mlirTranslateMatchToCpp(m2));
     } finally {
         runEl.disabled = false;
         syncResultAlignment();
@@ -169,6 +195,7 @@ function run() {
 try {
     const mlir = await loadMlir({ onLog: (s) => console.log(s) });
     mlirOptRun = mlir.mlirOptRun;
+    mlirTranslateMatchToCpp = mlir.mlirTranslateMatchToCpp;
     statusEl.textContent = `Ready. mlir-opt.wasm: ${(mlir.byteLength / 1e6).toFixed(1)} MB.`;
     runEl.disabled = false;
     applyHighlight(inputView, inputErr);

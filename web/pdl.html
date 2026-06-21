@@ -5,6 +5,11 @@
   <title>PDL → pdl_interp lowering</title>
   <link rel="stylesheet" href="./styles.css">
   <style>
+    /* The shared stylesheet caps body at 80rem; this page's two-lane diagram
+       wants the whole viewport so each pane is as wide as possible. The intro
+       and input editor stay capped (below) for readability. */
+    body { max-width: none; }
+
     .intro { font-size: 0.9rem; max-width: 60rem; opacity: 0.85; }
     .intro code { font-size: 0.85em; }
     .controls { display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0; }
@@ -44,8 +49,8 @@
       border-top: 7px solid var(--line);
     }
 
-    /* Two side-by-side lanes. `minmax(0, 1fr)` so wide IR scrolls inside a
-       pane instead of stretching the column. */
+    /* Two equal side-by-side lanes. `minmax(0, 1fr)` so wide IR scrolls inside
+       a pane instead of stretching the column. */
     .flows {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -94,6 +99,30 @@
 
     .stage { position: relative; }
 
+    /* The combined matchers feed two independent backends, stacked so each gets
+       the full lane width: the in-tree conversion pass to pdl_interp, and the
+       match-to-cpp translation (what `mlir-translate --match-to-cpp` runs) that
+       emits C++ patterns. They are NOT a sequence — the per-branch source notes
+       and the caption above keep the C++ from reading as a step after
+       pdl_interp. */
+    .branches {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    /* Per-branch reminder of each output's source. The two backends are stacked
+       vertically (pdl_interp above C++), so this label on each one is what keeps
+       the C++ from reading as a step that follows pdl_interp. */
+    .branch-src {
+      font-size: 0.72rem;
+      font-style: italic;
+      text-align: center;
+      opacity: 0.65;
+      margin: 0 0 0.1rem;
+    }
+
     /* Foldable intermediate stages: clicking the heading collapses the editor
        to just its title bar. pdl.js then realigns the two pdl_interp results
        when both intermediate match stages are folded. */
@@ -109,26 +138,16 @@
     .stage.foldable.folded > .editor,
     .stage.foldable.folded > .err { display: none; }
 
-    .result-tag {
-      display: inline-block;
-      font-size: 0.68rem;
-      font-family: ui-monospace, monospace;
-      padding: 0.05rem 0.4rem;
-      border-radius: 3px;
-      background: var(--accent);
-      color: #fff;
-      margin-left: 0.4rem;
-      vertical-align: middle;
-    }
-
     @media (max-width: 55rem) {
-      .flows { grid-template-columns: minmax(0, 1fr); }
+      /* The fork (which spaces the lanes off the input on desktop) is hidden
+         here, so add the gap back explicitly. */
+      .flows { grid-template-columns: minmax(0, 1fr); margin-top: 1rem; }
       .fork { display: none; }
     }
   </style>
 
-  <!-- CodeMirror is bundled into ./codemirror.js by the Nix `codemirror-bundle`
-       derivation (see flake.nix). No runtime CDN dependency. -->
+  <!-- CodeMirror is bundled into this page's content-hashed script by esbuild
+       (see web/build.mjs). No runtime CDN dependency. -->
 </head>
 <body>
   <h1>PDL → pdl_interp lowering</h1>
@@ -144,9 +163,13 @@
     <strong>match-dialect</strong> path goes through the <code>match</code>
     dialect, where independent matchers can be <em>combined</em> into a single
     shared decision tree (<code>switch_op_name</code>, common-prefix sharing)
-    before being lowered. Edit the patterns below and press Run to see every
-    intermediate step. Click an op name to link it to its lowered descendants
-    across panes.
+    before being lowered. The combined matchers feed two backends: the
+    <code>convert-match-to-pdl-interp</code> pass, and the
+    <code>match-to-cpp</code> translation (what <code>mlir-translate
+    --match-to-cpp</code> runs) which emits readable C++
+    <code>RewritePattern</code>s instead. Edit the patterns below and press Run
+    to see every intermediate step. Click an op name to link it to its lowered
+    descendants across panes.
   </p>
   <p id="status">Loading mlir-opt.wasm…</p>
   <div class="controls">
@@ -172,7 +195,7 @@
       <div class="lane-sub">one pass, one matcher per pattern</div>
       <div class="pass"><code>convert-pdl-to-pdl-interp</code></div>
       <div class="stage">
-        <h3>pdl_interp<span class="result-tag">result</span></h3>
+        <h3>pdl_interp</h3>
         <div class="editor" id="direct-out"></div>
         <pre class="err" id="direct-err"></pre>
       </div>
@@ -193,11 +216,31 @@
         <div class="editor" id="match2-out"></div>
         <pre class="err" id="match2-err"></pre>
       </div>
-      <div class="pass"><code>convert-match-to-pdl-interp</code></div>
-      <div class="stage">
-        <h3>pdl_interp<span class="result-tag">result</span></h3>
-        <div class="editor" id="match3-out"></div>
-        <pre class="err" id="match3-err"></pre>
+      <!-- The combined matchers feed two independent backends: the in-tree
+           conversion pass to pdl_interp, and the match-to-cpp translation that
+           `mlir-translate` would run to emit C++ RewritePatterns. The per-branch
+           "from the combined matchers" notes make clear that BOTH read the
+           combined matchers — the C++ is not produced from the pdl_interp
+           output. -->
+      <div class="branches">
+        <div class="branch">
+          <p class="branch-src">from the combined matchers</p>
+          <div class="pass"><code>convert-match-to-pdl-interp</code></div>
+          <div class="stage">
+            <h3>pdl_interp</h3>
+            <div class="editor" id="match3-out"></div>
+            <pre class="err" id="match3-err"></pre>
+          </div>
+        </div>
+        <div class="branch">
+          <p class="branch-src">from the combined matchers</p>
+          <div class="pass"><code>mlir-translate --match-to-cpp</code></div>
+          <div class="stage">
+            <h3>C++ rewrite patterns</h3>
+            <div class="editor" id="cpp-out"></div>
+            <pre class="err" id="cpp-err"></pre>
+          </div>
+        </div>
       </div>
     </section>
   </div>

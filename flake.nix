@@ -158,76 +158,63 @@
           '';
         };
 
-        # --- CodeMirror bundle ------------------------------------------------
-        # Pull the four @codemirror sub-packages we need via npm, then bundle
-        # them through esbuild into a single ESM file. Hosting the result next
-        # to the wasm gives the page zero runtime CDN dependencies and avoids
-        # the multi-instance-of-@codemirror/state Facet/instanceof pitfalls.
+        # --- Stage 4 ----------------------------------------------------------
+        # Build the optimized static site. esbuild bundles + minifies each
+        # page's JS (entry + editor + the @codemirror packages) into a
+        # code-split, content-hashed file; styles.css and the wasm bundle get
+        # hashed names too; and web/build.mjs rewrites the HTML + service worker
+        # to reference them. The result in $out is what gets uploaded to GitHub
+        # Pages, or served locally by pointing a static file server at `result/`.
         #
-        # The build inputs (./web/codemirror/) are just a package.json + a
-        # small re-export entry; no upstream CodeMirror source is checked in.
-        codemirror-bundle = pkgs.buildNpmPackage {
-          pname = "mlir-opt-codemirror-bundle";
+        # buildNpmPackage gives us the @codemirror node_modules (src is the
+        # ./web/codemirror package: a package.json + lockfile + a small
+        # re-export entry; no upstream CodeMirror source is checked in). The rest
+        # of the page sources are copied in alongside it so esbuild can resolve
+        # `@codemirror/*` from ./node_modules; the bundler itself is Nix-provided
+        # (pkgs.esbuild), so it stays out of the lockfile.
+        site = pkgs.buildNpmPackage {
+          pname = "mlir-opt-wasm-site";
           version = "1.0.0";
           src = ./web/codemirror;
 
           npmDepsHash = "sha256-y0Ddhop9QxFN1TWdpl1d6R6CIIUylF3sZsFWnk9tYnM=";
 
           dontNpmBuild = true;
-          nativeBuildInputs = [ pkgs.esbuild ];
+          nativeBuildInputs = [ pkgs.esbuild pkgs.nodejs ];
+
+          # web/build.mjs reads this to hash + copy the wasm artifacts in.
+          MLIR_WASM_DIR = mlir-opt-wasm;
+
+          buildPhase = ''
+            runHook preBuild
+            # The unpacked src root holds the codemirror package.json + the
+            # installed node_modules. Bring the page sources in beside them and
+            # expose the CodeMirror re-export entry as ./codemirror.js (what
+            # editor.js imports).
+            cp ${./web}/*.js ${./web}/*.mjs ${./web}/*.html ${./web}/*.css .
+            cp entry.js codemirror.js
+            node build.mjs
+            runHook postBuild
+          '';
 
           installPhase = ''
             runHook preInstall
             mkdir -p $out
-            esbuild entry.js \
-              --bundle \
-              --format=esm \
-              --target=es2020 \
-              --outfile=$out/codemirror.js
+            cp -r dist/. $out/
             runHook postInstall
           '';
         };
 
-        # --- Stage 4 ----------------------------------------------------------
-        # Assemble the static site: HTML + JS from ./web/ plus the wasm
-        # artifacts and the CodeMirror bundle, all at the root of $out. This is
-        # what gets uploaded to GitHub Pages, and what you serve locally by
-        # pointing any static file server at the built `result/` directory.
-        site = pkgs.runCommand "mlir-opt-wasm-site" { } ''
-          mkdir -p $out
-          cp ${./web/index.html}              $out/index.html
-          cp ${./web/pdl.html}                $out/pdl.html
-          cp ${./web/styles.css}              $out/styles.css
-          cp ${./web/app.js}                  $out/app.js
-          cp ${./web/pdl.js}                  $out/pdl.js
-          cp ${./web/editor.js}               $out/editor.js
-          cp ${codemirror-bundle}/codemirror.js $out/codemirror.js
-          cp ${mlir-opt-wasm}/mlir-opt.mjs    $out/mlir-opt.mjs
-          cp ${mlir-opt-wasm}/mlir-opt.wasm   $out/mlir-opt.wasm
-          cp ${./web/sw.js}                   $out/sw.js
-          chmod -R u+w $out
-
-          # Stamp the service worker with a content hash of every asset. Any
-          # rebuild that changes an asset changes this hash, hence sw.js itself,
-          # which is how the browser learns to install a fresh cache and purge
-          # the old one (see web/sw.js). Replaces the old Date.now() cache-bust.
-          ver=$(cat $out/index.html $out/pdl.html $out/styles.css \
-                    $out/app.js $out/pdl.js $out/editor.js \
-                    $out/codemirror.js $out/mlir-opt.mjs $out/mlir-opt.wasm \
-                | sha256sum | cut -c1-16)
-          substituteInPlace $out/sw.js --replace-fail __BUILD_VERSION__ "$ver"
-        '';
-
         devShell = pkgs.mkShell {
           # `npm install` inside web/codemirror/ to regenerate
-          # package-lock.json whenever the dep versions in package.json change.
+          # package-lock.json whenever the dep versions in package.json change;
+          # `node web/build.mjs` (with esbuild on PATH) to build the site.
           buildInputs = [ pkgs.nodejs pkgs.esbuild ];
         };
       in {
         packages = {
           default = site;
-          inherit llvm-native-tblgens mlir-wasm-sysroot mlir-opt-wasm
-                  codemirror-bundle site;
+          inherit llvm-native-tblgens mlir-wasm-sysroot mlir-opt-wasm site;
         };
         devShells.default = devShell;
       });

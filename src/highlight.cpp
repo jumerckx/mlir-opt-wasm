@@ -21,6 +21,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Support/Timing.h"
+#include "mlir/Target/MatchToCpp/MatchToCpp.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
@@ -488,6 +489,71 @@ extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
   if (!errBuf2.empty()) {
     os << ",\"warn\":";
     emitJsonString(os, errBuf2);
+  }
+  os << "}";
+  os.flush();
+  return toHeapString(out);
+}
+
+// Translate `match` matchers to C++ `RewritePattern` source, mirroring what
+// `mlir-translate --match-to-cpp` does on the command line. The input is the
+// combined-matchers IR (output of `match-combine-matchers`); the output is the
+// generated C++ rather than further MLIR, so there are no highlight spans —
+// just the source text. Returns JSON {ok:true,text:...} or {ok:false,err:...}.
+extern "C" char *mlir_translate_match_to_cpp(const char *input) {
+  if (!input) input = "";
+
+  MLIRContext &ctx = getHighlightContext();
+
+  std::string errBuf;
+  llvm::raw_string_ostream errStream(errBuf);
+
+  auto makeError = [&](llvm::StringRef msg) -> char * {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << "{\"ok\":false,\"err\":";
+    std::string combined;
+    if (!msg.empty()) combined = msg.str();
+    if (!errBuf.empty()) {
+      if (!combined.empty()) combined += '\n';
+      combined += errBuf;
+    }
+    emitJsonString(os, combined);
+    os << "}";
+    os.flush();
+    return toHeapString(out);
+  };
+
+  auto inputBuf = llvm::MemoryBuffer::getMemBufferCopy(input, "input.mlir");
+  llvm::SourceMgr srcMgr;
+  srcMgr.AddNewSourceBuffer(std::move(inputBuf), llvm::SMLoc());
+  SourceMgrDiagnosticHandler diagHandler(srcMgr, &ctx, errStream);
+
+  ParserConfig parserConfig(&ctx, /*verifyAfterParse=*/true);
+  OwningOpRef<ModuleOp> module =
+      parseSourceFile<ModuleOp>(srcMgr, parserConfig);
+  errStream.flush();
+  if (!module)
+    return makeError("parse failed");
+
+  std::string cppText;
+  {
+    llvm::raw_string_ostream os(cppText);
+    if (failed(match::translateToCpp(module->getOperation(), os))) {
+      os.flush();
+      errStream.flush();
+      return makeError("match-to-cpp translation failed");
+    }
+  }
+  errStream.flush();
+
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  os << "{\"ok\":true,\"text\":";
+  emitJsonString(os, cppText);
+  if (!errBuf.empty()) {
+    os << ",\"warn\":";
+    emitJsonString(os, errBuf);
   }
   os << "}";
   os.flush();

@@ -11,10 +11,35 @@
 // `updateViaCache: "none"` keeps the browser from serving a stale sw.js from
 // its HTTP cache, so a new build's SW is always detected. Best-effort: if the
 // browser has no SW support the page still works, just without caching.
+//
+// On a local origin we do the opposite. The SW only caches the wasm bundle now
+// (see sw.js), but during development you rebuild and reload constantly — a
+// cached wasm then shadows a freshly rebuilt one, so your changes don't show
+// up. Detect localhost (and the file:// protocol) and, instead of registering,
+// unregister any SW and drop every cache a previous visit installed, so local
+// testing always serves the files on disk. (This takes effect on the *next*
+// load, since the already-running SW still controls the current one — clear the
+// site's data once to bootstrap if you're stuck.)
+const isLocalOrigin =
+    location.protocol === "file:" ||
+    /^(localhost|127\.0\.0\.1|\[::1\]|::1|.*\.local|)$/.test(location.hostname);
 if ("serviceWorker" in navigator) {
-    navigator.serviceWorker
-        .register("./sw.js", { updateViaCache: "none" })
-        .catch(() => {});
+    if (isLocalOrigin) {
+        navigator.serviceWorker
+            .getRegistrations()
+            .then((regs) => regs.forEach((r) => r.unregister()))
+            .catch(() => {});
+        if (self.caches) {
+            caches
+                .keys()
+                .then((keys) => keys.forEach((k) => caches.delete(k)))
+                .catch(() => {});
+        }
+    } else {
+        navigator.serviceWorker
+            .register("./sw.js", { updateViaCache: "none" })
+            .catch(() => {});
+    }
 }
 
 // All CodeMirror symbols come from the locally bundled ESM file produced by
@@ -478,10 +503,10 @@ export function makeEditor({ parent, doc, editable, onChange }) {
 export async function loadMlir({ onLog } = {}) {
     const log = onLog || (() => {});
 
-    // Stable URLs (no cache-busting query string): the service worker caches
-    // these by URL and serves them offline, and staleness across rebuilds is
-    // handled by the SW's content-hashed cache version (see ./sw.js), so the
-    // browser can safely reuse the multi-MB wasm instead of refetching it.
+    // These two relative URLs are rewritten to the content-hashed asset names
+    // by the build (web/build.mjs); the literals here are what it matches on.
+    // Hashed names mean the browser (and the SW, see ./sw.js) can cache the
+    // multi-MB wasm immutably and never serve a stale copy across rebuilds.
     const { default: MlirOpt } = await import("./mlir-opt.mjs");
     const res = await fetch("./mlir-opt.wasm");
     if (!res.ok) throw new Error(`fetch mlir-opt.wasm: HTTP ${res.status}`);
@@ -525,10 +550,14 @@ export async function loadMlir({ onLog } = {}) {
     highlight = (text) => callJson("mlir_highlight", [text]);
     const mlirOptRun = (text, args) =>
         callJson("mlir_opt_run", [text, args]);
+    // `mlir-translate --match-to-cpp`: combined matchers → generated C++.
+    const mlirTranslateMatchToCpp = (text) =>
+        callJson("mlir_translate_match_to_cpp", [text]);
 
     return {
         highlight,
         mlirOptRun,
+        mlirTranslateMatchToCpp,
         byteLength: wasmBytes.byteLength,
     };
 }
