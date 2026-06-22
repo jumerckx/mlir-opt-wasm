@@ -28,9 +28,7 @@ const inputErr = $("input-err");
 // Two patterns that differ only in op name and constant value, so
 // `match-combine-matchers` has something meaningful to merge: it factors the
 // shared prefix and emits a single `switch_op_name` decision tree.
-const INITIAL_INPUT = `// Two similar patterns: x + 0 -> x and x * 1 -> x.
-// The match flow combines their matchers; the direct flow keeps them separate.
-pdl.pattern @addZero : benefit(1) {
+const INITIAL_INPUT = `pdl.pattern @addZero : benefit(1) {
   %t = pdl.type
   %a = pdl.operand : %t
   %c0 = pdl.attribute = 0 : i32
@@ -169,7 +167,10 @@ function run() {
         for (const st of STAGES) clearEditor(st.view, st.errEl);
 
         // Direct flow: a single pass.
-        setStage(stage.direct, mlirOptRun(input, "--convert-pdl-to-pdl-interp"));
+        setStage(
+            stage.direct,
+            mlirOptRun(input, "--convert-pdl-to-pdl-interp"),
+        );
 
         // Match flow: three chained passes, each fed the previous output.
         const m1 = setStage(

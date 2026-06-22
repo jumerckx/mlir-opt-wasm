@@ -155,22 +155,6 @@
     <a href="./index.html">mlir-opt</a> ·
     <a href="./pdl.html" aria-current="page">PDL → pdl_interp lowering</a>
   </nav>
-  <p class="intro">
-    PDL rewrite patterns are lowered to the executable <code>pdl_interp</code>
-    dialect before being run by the bytecode interpreter. There are two ways to
-    get there. The <strong>direct</strong> path runs
-    <code>convert-pdl-to-pdl-interp</code> in one shot. The
-    <strong>match-dialect</strong> path goes through the <code>match</code>
-    dialect, where independent matchers can be <em>combined</em> into a single
-    shared decision tree (<code>switch_op_name</code>, common-prefix sharing)
-    before being lowered. The combined matchers feed two backends: the
-    <code>convert-match-to-pdl-interp</code> pass, and the
-    <code>match-to-cpp</code> translation (what <code>mlir-translate
-    --match-to-cpp</code> runs) which emits readable C++
-    <code>RewritePattern</code>s instead. Edit the patterns below and press Run
-    to see every intermediate step. Click an op name to link it to its lowered
-    descendants across panes.
-  </p>
   <p id="status">Loading mlir-opt.wasm…</p>
   <div class="controls">
     <button id="run" disabled>Run</button>
