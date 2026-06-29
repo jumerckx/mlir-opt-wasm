@@ -20,8 +20,11 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "mlir/Support/FileUtilities.h"
 #include "mlir/Support/Timing.h"
+#include "mlir/TableGen/Operator.h"
 #include "mlir/Target/MatchToCpp/MatchToCpp.h"
+#include "mlir/Target/MatchToCpp/OpInfoRegistry.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
@@ -31,13 +34,17 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TableGen/Parser.h"
+#include "llvm/TableGen/Record.h"
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -241,6 +248,86 @@ char *toHeapString(const std::string &s) {
   std::memcpy(result, s.data(), s.size());
   result[s.size()] = '\0';
   return result;
+}
+
+// Location in the wasm MEMFS of the arith dialect's ODS `.td` tree. CMake bakes
+// it in with emscripten's `--embed-file` (see src/CMakeLists.txt); the include
+// root holds the transitive `.td` closure ArithOps.td pulls from mlir/IR and
+// mlir/Interfaces. Only the arith dialect's ops are registered below, so they
+// get concrete-typed (`dyn_cast`) matchers while every other op falls back to
+// the generic `Operation *` emission.
+constexpr const char *kOdsIncludeDir = "/ods";
+constexpr const char *kArithOdsFile = "/ods/mlir/Dialect/Arith/IR/ArithOps.td";
+
+// Statically fixed flat operand/result count for a list of ODS groups, or -1
+// when any group is variadic or the matching segment-size trait is present.
+// Mirrors fixedFlatCount() in mlir-match-to-cpp.cpp.
+template <typename RangeT>
+int fixedFlatCount(RangeT &&groups, int count, bool attrSizedSegments) {
+  if (attrSizedSegments)
+    return -1;
+  for (const auto &group : groups)
+    if (group.isVariableLength())
+      return -1;
+  return count;
+}
+
+// Parse the arith ODS via TableGen and record the static structure the
+// match-to-cpp emitter needs for each op, exactly as the standalone
+// mlir-match-to-cpp tool does in buildRegistry(). Built once and cached; a
+// parse failure leaves the registry empty, which degrades to generic output.
+const match::OpInfoRegistry &getArithOpInfoRegistry() {
+  static match::OpInfoRegistry *registry = []() {
+    auto *reg = new match::OpInfoRegistry();
+
+    std::string errorMessage;
+    std::unique_ptr<llvm::MemoryBuffer> buffer =
+        openInputFile(kArithOdsFile, &errorMessage);
+    if (!buffer) {
+      llvm::errs() << "match-to-cpp: " << errorMessage << "\n";
+      return reg;
+    }
+
+    llvm::SourceMgr tdSrcMgr;
+    tdSrcMgr.AddNewSourceBuffer(std::move(buffer), llvm::SMLoc());
+    tdSrcMgr.setIncludeDirs({std::string(kOdsIncludeDir)});
+    tdSrcMgr.setVirtualFileSystem(llvm::vfs::getRealFileSystem());
+
+    llvm::RecordKeeper records;
+    if (llvm::TableGenParseFile(tdSrcMgr, records)) {
+      llvm::errs() << "match-to-cpp: failed to parse arith ODS\n";
+      return reg;
+    }
+
+    for (const llvm::Record *def : records.getAllDerivedDefinitions("Op")) {
+      tblgen::Operator op(def);
+
+      bool attrSizedOperands =
+          op.getTrait("::mlir::OpTrait::AttrSizedOperandSegments");
+      bool attrSizedResults =
+          op.getTrait("::mlir::OpTrait::AttrSizedResultSegments");
+
+      match::OpInfo info;
+      // Spell the class fully-qualified from the global namespace; some
+      // dialects already prefix their cppNamespace with "::".
+      std::string qualClass = op.getQualCppClassName();
+      if (!llvm::StringRef(qualClass).starts_with("::"))
+        qualClass = "::" + qualClass;
+      info.cppClassName = std::move(qualClass);
+      info.numOperandGroups = op.getNumOperands();
+      info.numResultGroups = op.getNumResults();
+      info.attrSizedOperandSegments = attrSizedOperands;
+      info.attrSizedResultSegments = attrSizedResults;
+      info.fixedNumOperands = fixedFlatCount(
+          op.getOperands(), op.getNumOperands(), attrSizedOperands);
+      info.fixedNumResults =
+          fixedFlatCount(op.getResults(), op.getNumResults(), attrSizedResults);
+
+      reg->insert(op.getOperationName(), std::move(info));
+    }
+    return reg;
+  }();
+  return *registry;
 }
 
 } // namespace
@@ -496,10 +583,13 @@ extern "C" char *mlir_opt_run(const char *input, const char *argsCStr) {
 }
 
 // Translate `match` matchers to C++ `RewritePattern` source, mirroring what
-// `mlir-translate --match-to-cpp` does on the command line. The input is the
+// the `mlir-match-to-cpp` tool does on the command line. The input is the
 // combined-matchers IR (output of `match-combine-matchers`); the output is the
 // generated C++ rather than further MLIR, so there are no highlight spans —
-// just the source text. Returns JSON {ok:true,text:...} or {ok:false,err:...}.
+// just the source text. The arith dialect's ODS is supplied (see
+// getArithOpInfoRegistry), so arith ops emit concrete-typed (`dyn_cast`)
+// matchers while other ops use the generic `Operation *` emission. Returns JSON
+// {ok:true,text:...} or {ok:false,err:...}.
 extern "C" char *mlir_translate_match_to_cpp(const char *input) {
   if (!input) input = "";
 
@@ -539,7 +629,8 @@ extern "C" char *mlir_translate_match_to_cpp(const char *input) {
   std::string cppText;
   {
     llvm::raw_string_ostream os(cppText);
-    if (failed(match::translateToCpp(module->getOperation(), os))) {
+    if (failed(match::translateToCpp(module->getOperation(), os,
+                                     getArithOpInfoRegistry()))) {
       os.flush();
       errStream.flush();
       return makeError("match-to-cpp translation failed");

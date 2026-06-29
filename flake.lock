@@ -21,11 +21,11 @@
     "llvm-project": {
       "flake": false,
       "locked": {
-        "lastModified": 1782567128,
-        "narHash": "sha256-i2uIa5GNi/nf2bd6YSfiGQNlicSyhenicWrhSSZMVPM=",
+        "lastModified": 1782730001,
+        "narHash": "sha256-EpTe59+fn3jVvDb8lZTQcNjodmYNiMRQJl+Rg9CDFXc=",
         "owner": "jumerckx",
         "repo": "llvm-project",
-        "rev": "6b5153d35917a0efc32b1b5910408d2d09b4299a",
+        "rev": "7be399b61aadd27c88eec97d406b17ede6708c70",
         "type": "github"
       },
       "original": {

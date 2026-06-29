@@ -136,10 +136,26 @@
           configurePhase = ''
             runHook preConfigure
             ${emSetupCache}
+
+            # Stage the arith dialect's ODS `.td` closure so it can be embedded
+            # into the wasm MEMFS (--embed-file in CMakeLists). The match-to-cpp
+            # translation parses ArithOps.td at runtime to emit concrete-typed
+            # matchers. ArithOps.td pulls in mlir/IR and mlir/Interfaces, so we
+            # stage those three subtrees (structure preserved); no other
+            # dialect's ODS is included, matching the "arith only" intent.
+            odsDir=$PWD/ods-staging
+            odsSrc=${mlir-wasm-sysroot}/include
+            # install -D recreates the parent dirs writable (the Nix store
+            # sources are read-only, so a plain `cp --parents` can't).
+            for f in $(cd $odsSrc && find mlir/IR mlir/Interfaces mlir/Dialect/Arith -name '*.td'); do
+              install -D -m644 "$odsSrc/$f" "$odsDir/$f"
+            done
+
             emcmake cmake -G Ninja -S . -B build \
               -DCMAKE_BUILD_TYPE=Release \
               -DLLVM_DIR=${mlir-wasm-sysroot}/lib/cmake/llvm \
-              -DMLIR_DIR=${mlir-wasm-sysroot}/lib/cmake/mlir
+              -DMLIR_DIR=${mlir-wasm-sysroot}/lib/cmake/mlir \
+              -DMLIR_ODS_DIR=$odsDir
             runHook postConfigure
           '';
 
