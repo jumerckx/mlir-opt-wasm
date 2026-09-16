@@ -21,16 +21,16 @@
     "llvm-project": {
       "flake": false,
       "locked": {
-        "lastModified": 1782730001,
-        "narHash": "sha256-EpTe59+fn3jVvDb8lZTQcNjodmYNiMRQJl+Rg9CDFXc=",
+        "lastModified": 1789549222,
+        "narHash": "sha256-3MMCqIDOnHpGMXyCpL5vkcWsyl5uYFKU+kB4bgpy/34=",
         "owner": "jumerckx",
         "repo": "llvm-project",
-        "rev": "7be399b61aadd27c88eec97d406b17ede6708c70",
+        "rev": "426b2be2f770630977f992142cea0e998d7fe716",
         "type": "github"
       },
       "original": {
         "owner": "jumerckx",
-        "ref": "jm/pdl_constr_cpp",
+        "ref": "jm/match-to-cpp",
         "repo": "llvm-project",
         "type": "github"
       }
