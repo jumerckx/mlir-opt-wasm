@@ -100,7 +100,7 @@
 
     /* The combined matchers feed two independent backends, stacked so each gets
        the full lane width: the in-tree conversion pass to pdl_interp, and the
-       match-to-cpp translation (what `mlir-translate --match-to-cpp` runs) that
+       match-to-cpp translation (what `mlir-match-to-cpp` runs) that
        emits C++ patterns. They are NOT a sequence — the per-branch source notes
        and the caption above keep the C++ from reading as a step after
        pdl_interp. */
@@ -215,7 +215,7 @@
         </div>
         <div class="branch">
           <p class="branch-src">from the combined matchers</p>
-          <div class="pass"><code>mlir-translate --match-to-cpp</code></div>
+          <div class="pass"><code>mlir-match-to-cpp</code></div>
           <div class="stage">
             <h3>C++ rewrite patterns</h3>
             <div class="editor" id="cpp-out"></div>

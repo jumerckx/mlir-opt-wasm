@@ -603,7 +603,7 @@ export async function loadMlir({ onLog } = {}) {
     highlight = (text) => callJson("mlir_highlight", [text]);
     const mlirOptRun = (text, args) =>
         callJson("mlir_opt_run", [text, args]);
-    // `mlir-translate --match-to-cpp`: combined matchers → generated C++.
+    // `mlir-match-to-cpp`: combined matchers → generated C++.
     const mlirTranslateMatchToCpp = (text) =>
         callJson("mlir_translate_match_to_cpp", [text]);
 
