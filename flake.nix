@@ -94,6 +94,7 @@
               -DLLVM_TARGETS_TO_BUILD=WebAssembly \
               -DLLVM_ENABLE_PROJECTS="mlir" \
               -DLLVM_ENABLE_DUMP=OFF \
+              -DLLVM_ENABLE_PIC=OFF \
               -DLLVM_ENABLE_ASSERTIONS=OFF \
               -DLLVM_ENABLE_BACKTRACES=OFF \
               -DLLVM_ENABLE_THREADS=OFF \
